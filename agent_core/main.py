@@ -1,17 +1,18 @@
 # agent_core/main.py
 
-from crewai import Agent, Task, Crew, Process
-# Usamos la importación más moderna y específica para Ollama
-from langchain_ollama import ChatOllama
+from crewai import Agent, Task, Crew, Process, LLM
 import pandas as pd
 import json
 
 from .tools.strategy_tools import OBRStrategyTool
 
 # --- 1. Configuración del LLM Local (Ollama) ---
-# Esta es la forma más robusta y recomendada.
-# Asegúrate de que Ollama esté corriendo en segundo plano.
-llm = ChatOllama(model="llama3:8b")
+# Esta es la forma explícita y recomendada por CrewAI para
+# conectar con un LLM a través de LiteLLM.
+llm = LLM(
+    model="ollama/llama3:8b",  # Especifica el proveedor y el modelo
+    base_url="http://localhost:11434" # URL del servidor de Ollama
+)
 
 # --- 2. Inicialización de Herramientas ---
 obr_tool = OBRStrategyTool()
@@ -26,7 +27,6 @@ market_analyst = Agent(
         "Your output must be ONLY the direct result from the tool."
     ),
     tools=[obr_tool],
-    # Pasamos el LLM explícitamente al agente
     llm=llm,
     verbose=True,
     allow_delegation=False,
