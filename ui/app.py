@@ -477,6 +477,8 @@ if load_button:
         'sidebar_use_cache': st.session_state.sidebar_use_cache_widget,
     })
     
+    handle_signal_request(historical_data=None, current_levels=None, reset_strategy=True)
+
     if st.session_state.download_start_date > st.session_state.download_end_date:
         st.error("La 'Fecha Inicio Descarga' no puede ser posterior a la 'Fecha Fin Descarga'.")
         st.stop()
@@ -637,6 +639,8 @@ if st.session_state.replay_started:
     if data_needs_reprocessing:
         logger.info(f"Reprocesando datos para fecha de replay: {st.session_state.start_date_obj.strftime('%Y-%m-%d')} y Timezone Display: {st.session_state.display_tz}...")
         
+        handle_signal_request(historical_data=None, current_levels=None, reset_strategy=True)
+
         st.session_state.processed_tz = st.session_state.display_tz
         st.session_state.last_processed_day = st.session_state.start_date_obj
         st.session_state.symbol_processed = st.session_state.symbol_loaded
@@ -884,6 +888,13 @@ if st.session_state.replay_started:
                             st.session_state.markers.append(new_trade_marker)
                     
                     if position_before_signal != 'FLAT' and st.session_state.executor.position == 'FLAT':
+                        # --- INICIO CORRECCIÓN: Lógica para pausar Autoplay ---
+                        if st.session_state.get('autoplaying', False):
+                            st.session_state.autoplaying = False
+                            st.toast("Autoplay pausado por cierre de operación.")
+                            logger.info("Autoplay pausado por cierre de operación.")
+                        # --- FIN CORRECCIÓN ---
+
                         if not sl_before_signal_dec.is_nan():
                             try: st.session_state.last_trade_sl_display = float(sl_before_signal_dec)
                             except: st.session_state.last_trade_sl_display = None

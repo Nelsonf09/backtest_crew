@@ -3,9 +3,30 @@
 from crewai import Agent, Task, Crew, Process, LLM
 import pandas as pd
 import json
+import numpy as np
 
 # Ya no necesitamos la herramienta, la estrategia se llama directamente
 from strategies.opening_br_strategy import OpeningBreakRetestStrategy
+
+# --- INICIO: Función de Ayuda para Sanitizar Datos ---
+def convert_numpy_types(obj):
+    """
+    Recorre recursivamente un objeto (diccionario, lista) y convierte los tipos
+    de datos de NumPy a tipos nativos de Python para que sean serializables a JSON.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(i) for i in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+# --- FIN: Función de Ayuda para Sanitizar Datos ---
+
 
 # --- 1. Configuración del LLM Local (Ollama) ---
 llm = LLM(model="ollama/llama3:8b", base_url="http://localhost:11434")
@@ -15,7 +36,7 @@ llm = LLM(model="ollama/llama3:8b", base_url="http://localhost:11434")
 strategy_params = {
     "max_retest_candles": 15, "risk_reward_ratio": 2.0,
     "sl_method": "LOOKBACK_MIN_MAX", "sl_lookback": 2,
-    "ema_filter_mode": "Desactivado"
+    "ema_filter_mode": "Desactivado" # Este valor se sobreescribe desde la UI
 }
 obr_strategy = OpeningBreakRetestStrategy(**strategy_params)
 
@@ -53,38 +74,44 @@ deterministic_crew = Crew(
 )
 
 # --- 6. Función de Entrada Principal ---
-def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict) -> str | dict:
+def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict, reset_strategy: bool = False) -> str | dict:
     """
-    1. Calcula la señal usando la estrategia localmente.
-    2. Pasa la señal al Crew para validación (en Fase 1, solo la confirma).
-    3. Devuelve el resultado.
+    1. Resetea la estrategia si se solicita.
+    2. Calcula la señal usando la estrategia localmente.
+    3. Pasa la señal al Crew para validación.
+    4. Devuelve el resultado.
     """
+    # --- INICIO CORRECCIÓN: Lógica de Reseteo ---
+    if reset_strategy:
+        obr_strategy.reset()
+        return "RESET_OK"
+    # --- FIN CORRECCIÓN ---
+
+    # Si la llamada no es para resetear, se necesitan los datos.
+    if historical_data is None or historical_data.empty:
+        return 'HOLD'
+
     print("🧠 Strategy Core: Calculating signal locally...")
-    # Paso 1: Obtenemos la señal de nuestra estrategia, que tiene acceso a todo el historial.
     signal = obr_strategy.get_signal(
         data=historical_data,
         current_day_levels=current_levels
     )
     print(f"📈 Strategy Signal: {signal}")
 
-    # Si la señal es 'HOLD', no necesitamos molestar al agente.
     if signal == 'HOLD':
         return "HOLD"
         
-    # Si hay una señal, la pasamos al agente para que la "valide".
     print("🤖 Agent Core: Signal calculated. Kicking off the crew for validation...")
     try:
-        # Convertimos la señal a un string para pasarla al agente
-        signal_input = json.dumps(signal) if isinstance(signal, dict) else signal
+        sanitized_signal = convert_numpy_types(signal)
+        signal_input = json.dumps(sanitized_signal)
 
         inputs = {"signal": signal_input}
         result = deterministic_crew.kickoff(inputs=inputs)
         
         print(f"✅ Agent Core: Crew finished. Raw Result: '{result}'")
         
-        # Como la señal original ya era un diccionario, la devolvemos directamente.
-        # La limpieza de la salida del LLM ya no es tan crítica.
-        return signal
+        return sanitized_signal
 
     except Exception as e:
         print(f"❌ Agent Core: An error occurred during crew execution: {e}")
