@@ -1,0 +1,87 @@
+# =========================
+# Python
+# =========================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# Entornos/variables
+.env
+.env.*
+*.env
+
+# Cachés y herramientas
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# =========================
+# Editores/IDE
+# =========================
+.vscode/
+.idea/
+*.code-workspace
+
+# =========================
+# SO
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Proyecto (personaliza según tu repo)
+# =========================
+.tmp.driveupload/
+cache/
+logs/
+tmp/
+
+# Streamlit (si lo usas)
+.streamlit/secrets.toml
+.streamlit/config.toml
+.streamlit/*.lock
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Playwright (si lo usas)
+playwright-report/
+test-results/
+playwright/.cache/
+
+# LanceDB / Arrow (si lo usas)
+# lancedb/
+# **/*.lance
+# **/*.arrow
+
+# =========================
+# Datos/artefactos pesados (opcional - descomenta si aplica)
+# =========================
+# data/
+# datasets/
+# *.csv
+# *.parquet
+# *.jsonl
+# *.zip
+# *.tar
+# *.bin
+# *.pt
+# *.onnx
+# *.pkl
