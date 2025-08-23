@@ -32,7 +32,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         self.level_fsms = {}
         self.last_levels_processed = None
 
-        # Lógica de EMA incremental (se mantiene igual)
+        # Lógica de EMA incremental
         self.last_ema_values = {}
         self.ema_alphas = {p: 2 / (p + 1) for p in self.ema_periods if isinstance(p, int) and p > 0}
         self.last_processed_timestamp = None
@@ -48,19 +48,35 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         logger.debug("Estrategia OBR (FSM) reseteada.")
 
     def _initialize_fsms(self, current_day_levels: dict):
-        """ Crea o resetea las FSMs para los niveles del día actual. """
+        """ 
+        Crea o resetea las FSMs para los niveles del día actual, aplicando la lógica
+        de ignorar niveles dentro del rango de apertura.
+        """
         if current_day_levels == self.last_levels_processed:
-            return # No hacer nada si los niveles no han cambiado
+            return
 
         logger.info(f"Inicializando FSMs para nuevos niveles: {current_day_levels}")
         self.level_fsms = {}
+        
+        orh = current_day_levels.get('ORH')
+        orl = current_day_levels.get('ORL')
+        
         high_levels = ['ORH', 'PMH', 'PDH']
         low_levels = ['ORL', 'PML', 'PDL']
 
         for name, price in current_day_levels.items():
             if price is None or pd.isna(price):
                 continue
-            
+
+            # --- LÓGICA DE FILTRADO RESTAURADA ---
+            # Si el nivel es PMH/PML o PDH/PDL, comprobar si está dentro del rango ORH/ORL.
+            if name in ['PMH', 'PML', 'PDH', 'PDL']:
+                if orh is not None and orl is not None:
+                    if orl < price < orh:
+                        logger.info(f"Ignorando nivel {name} ({price:.2f}) porque está dentro del rango de apertura (ORL: {orl:.2f}, ORH: {orh:.2f}).")
+                        continue # Saltar a la siguiente iteración, no crear FSM para este nivel.
+            # --- FIN DE LA LÓGICA DE FILTRADO ---
+
             direction = None
             if name in high_levels:
                 direction = 'up'
@@ -75,29 +91,26 @@ class OpeningBreakRetestStrategy(BaseStrategy):
                     config=self.fsm_config
                 )
         self.last_levels_processed = current_day_levels.copy()
+        logger.info(f"FSMs activas después del filtrado: {list(self.level_fsms.keys())}")
+
 
     def get_signal(self, data: pd.DataFrame, current_day_levels: dict | None = None) -> str | dict:
         if len(data) < 2:
             return 'HOLD'
 
-        # 1. Inicializar/Resetear FSMs si los niveles del día han cambiado
         if current_day_levels:
             self._initialize_fsms(current_day_levels)
 
-        # 2. Actualizar EMAs (lógica incremental existente)
         ema_values = self._update_emas(data)
 
-        # 3. Procesar la vela actual en todas las FSMs activas
         current_candle = data.iloc[-1]
         previous_candle = data.iloc[-2]
         current_candle_idx = len(data) - 1
         
         for level_name, fsm in self.level_fsms.items():
-            # Solo procesar FSMs que no estén en un estado final
             if fsm.state not in [State.SIGNAL_EMITTED, State.INVALIDATED]:
                 signal_info = fsm.process_candle(current_candle, previous_candle, current_candle_idx)
 
-                # 4. Si una FSM emite una señal, procesarla
                 if signal_info:
                     return self._process_fsm_signal(signal_info, level_name, data, ema_values)
         
@@ -108,13 +121,11 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         direction = self.level_fsms[level_name].direction
         signal_type = 'BUY' if direction == 'up' else 'SELL'
 
-        # 5. Aplicar Filtro de EMA
         if not self._passes_ema_filter(signal_type, signal_info['retest_price'], ema_values):
             logger.info(f"Señal de {level_name} FILTRADA por condiciones de EMA.")
-            self.level_fsms[level_name].state = State.INVALIDATED # Invalidar para no volver a usarla
+            self.level_fsms[level_name].state = State.INVALIDATED
             return 'HOLD'
 
-        # 6. Calcular SL y TP
         sl_price = self._calculate_sl(signal_type, signal_info['break_info'], data)
         if pd.isna(sl_price):
             logger.warning(f"No se pudo calcular SL para la señal de {level_name}. Invalidando.")
@@ -128,7 +139,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             reward_distance = risk_distance * self.risk_reward_ratio
             tp_price = entry_price + reward_distance if signal_type == 'BUY' else entry_price - reward_distance
 
-        # 7. Construir y devolver el diccionario de la señal final
         final_signal = {
             'type': signal_type,
             'sl_price': float(sl_price),
@@ -138,7 +148,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         }
         logger.info(f"SEÑAL FINAL GENERADA por FSM-{level_name}: {final_signal}")
         
-        # Marcar todas las FSM como finales para evitar señales conflictivas en la misma vela
         for fsm in self.level_fsms.values():
             fsm.state = State.SIGNAL_EMITTED
 
@@ -171,7 +180,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             ema_m = ema_values[f'EMA_{self.ema_periods[1]}']
             ema_l = ema_values[f'EMA_{self.ema_periods[2]}']
             if pd.isna(ema_s) or pd.isna(ema_m) or pd.isna(ema_l):
-                return False # No se puede filtrar sin datos de EMA
+                return False
         except (KeyError, IndexError):
             logger.warning("Faltan periodos de EMA para el filtro.")
             return False
@@ -226,6 +235,5 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             if prev_ema is not None and not pd.isna(prev_ema):
                 self.last_ema_values[key] = prev_ema + alpha * (current_close - prev_ema)
             else:
-                # Si un valor de EMA se vuelve NaN, forzamos una reinicialización completa en la próxima vela
                 self.last_ema_values = {} 
                 return
