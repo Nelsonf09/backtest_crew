@@ -128,6 +128,12 @@ class ExecutionSimulator:
 
         logger.info(f"ExecutionSimulator (FSM) inicializado: Capital={self.initial_capital:.2f}, Leverage={self.leverage}:1")
 
+    def set_leverage(self, new_leverage: int):
+        """Permite actualizar el apalancamiento dinámicamente."""
+        old_leverage = self.leverage
+        self.leverage = max(1, int(new_leverage))
+        logger.info(f"Apalancamiento actualizado de {old_leverage}:1 a {self.leverage}:1.")
+
     def _get_execution_price(self, target_price: float, signal_type_for_slippage: str) -> Decimal:
         price_dec = quantize(target_price)
         if price_dec.is_nan(): return price_dec
@@ -198,17 +204,10 @@ class ExecutionSimulator:
         
         self.closed_trades.append(self.current_trade.to_dict())
         self.closed_pnl_total += self.current_trade.pnl_net
-
-        # Actualizar cash basado en el PNL.
-        # El cash de la entrada ya se descontó (comisión). Ahora se suma el PNL y se descuenta la comisión de salida.
-        # cash_change = self.current_trade.pnl_gross
-        # self.cash += cash_change - self.commission_per_side
         
-        # Corrección: El cálculo del cash debe ser más explícito para evitar errores.
         pnl_bruto = self.current_trade.pnl_gross
         self.cash = self.cash + pnl_bruto - self.commission_per_side
 
-        # Crear marcador para la UI
         pnl_net_display = f"{self.current_trade.pnl_net:.2f}"
         marker_color = "red" if self.current_trade.pnl_net < Decimal('0') else "green"
         if exit_reason.startswith("SL"): marker_color = "red"
@@ -224,7 +223,6 @@ class ExecutionSimulator:
             'trade': self.closed_trades[-1].copy()
         }
 
-        # Resetear estado de la cuenta
         self.current_trade = None
         self.account_fsm.transition_to(TradeState.FLAT)
         
@@ -245,21 +243,18 @@ class ExecutionSimulator:
             self._update_equity_history(None, timestamp)
             return None
 
-        # --- Lógica de Gestión de Trade Activo ---
         if self.account_fsm.is_in_state(TradeState.ACTIVE) and self.current_trade:
             self.current_trade.update_on_candle(candle)
             
-            # 1. Chequeo de SL/TP
             exit_reason, exit_price_trigger = self._check_sl_tp(candle)
             if exit_reason:
-                exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY' # Corregido para slippage
+                exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
                 exit_exec_price = self._get_execution_price(float(exit_price_trigger), exit_signal_type)
                 if not exit_exec_price.is_nan():
                     result = self._close_current_position(timestamp, exit_exec_price, exit_reason)
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
-            # 2. Chequeo de Timeout
             if self.max_holding_candles and self.current_trade.candles_held >= self.max_holding_candles:
                 exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
                 exit_exec_price = self._get_execution_price(close_price_float, exit_signal_type)
@@ -268,7 +263,6 @@ class ExecutionSimulator:
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
-            # 3. Chequeo de Señal de Cierre explícita
             signal_type = signal if isinstance(signal, str) else signal.get('type', 'HOLD')
             if (self.current_trade.direction == 'LONG' and signal_type == 'SELL') or \
                (self.current_trade.direction == 'SHORT' and signal_type == 'BUY'):
@@ -279,7 +273,6 @@ class ExecutionSimulator:
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
-        # --- Lógica de Apertura de Trade ---
         if self.account_fsm.is_in_state(TradeState.FLAT) and isinstance(signal, dict):
             signal_type = signal.get('type', 'HOLD').upper()
             if signal_type in ['BUY', 'SELL']:
@@ -287,7 +280,6 @@ class ExecutionSimulator:
                 self._update_equity_history(close_price_float, timestamp)
                 return result
 
-        # Si no hay acciones, solo actualizamos el equity
         self._update_equity_history(close_price_float, timestamp)
         return None
 
@@ -300,16 +292,16 @@ class ExecutionSimulator:
 
         high = quantize(candle['high'])
         low = quantize(candle['low'])
-        close = quantize(candle['close']) # La lógica original usaba close para SL
+        close = quantize(candle['close'])
 
         is_tp_hit, is_sl_hit = False, False
         
         if self.current_trade.direction == 'LONG':
             if high >= tp: is_tp_hit = True
-            if close <= sl: is_sl_hit = True # SL se comprueba con el cierre
+            if close <= sl: is_sl_hit = True
         elif self.current_trade.direction == 'SHORT':
             if low <= tp: is_tp_hit = True
-            if close >= sl: is_sl_hit = True # SL se comprueba con el cierre
+            if close >= sl: is_sl_hit = True
         
         if is_tp_hit and is_sl_hit:
             return ("TP", tp) if TP_PRIORITY_OVER_SL else ("SL", sl)
@@ -327,7 +319,6 @@ class ExecutionSimulator:
             if not self.equity_history or self.equity_history[-1][0] < timestamp_utc:
                 self.equity_history.append(new_point)
             elif self.equity_history[-1][0] == timestamp_utc:
-                # Actualiza el último punto si es el mismo timestamp
                 self.equity_history[-1] = new_point
 
     def get_equity(self, current_close_price: float | None = None) -> Decimal:
@@ -349,4 +340,3 @@ class ExecutionSimulator:
     
     def get_equity_history(self) -> list:
         return self.equity_history.copy()
-

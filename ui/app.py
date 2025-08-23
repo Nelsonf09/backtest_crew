@@ -1,8 +1,8 @@
 # ui/app.py
 """
 Aplicación Streamlit para el Backtesting Player Visual.
-Versión completa con FSM de estado de aplicación (AppState) y todas las
-funcionalidades de control y configuración de la versión original reintegradas.
+Versión optimizada con cálculo de métricas eficiente y uso de st.empty()
+para una actualización fluida de la interfaz. CORREGIDO: Lógica de actualización de métricas y apalancamiento.
 """
 # --- PARCHE ASYNCIO (Necesario para crewai en Streamlit) ---
 import nest_asyncio
@@ -62,8 +62,8 @@ def initialize_session_state():
     st.session_state.performance_metrics = {}
     st.session_state.static_levels = {}
     st.session_state.opening_levels = {}
-    st.session_state.session_trades = [] # Historial de trades para toda la sesión
-    st.session_state.last_closed_trade_levels = {} # Para mantener SL/TP en el gráfico
+    st.session_state.session_trades = []
+    st.session_state.last_closed_trade_levels = {}
     
     # Parámetros de la UI
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
@@ -99,7 +99,7 @@ def load_data_and_start_replay():
     st.session_state.app_fsm.transition_to(AppState.LOADING_DATA)
 
 def process_loading_state():
-    """Ejecuta la lógica de carga de datos, incluyendo datos principales y niveles iniciales."""
+    """Ejecuta la lógica de carga de datos."""
     st.session_state.data_manager = DataManager()
     dm = st.session_state.data_manager
 
@@ -108,6 +108,7 @@ def process_loading_state():
     st.session_state.markers = []
     st.session_state.equity_history = []
     st.session_state.last_closed_trade_levels = {}
+    st.session_state.performance_metrics = {}
     handle_signal_request(None, None, reset_strategy=True)
     st.session_state.executor = ExecutionSimulator(
         initial_capital=config.INITIAL_CAPITAL,
@@ -147,7 +148,7 @@ def process_loading_state():
         dm.disconnect_ib()
 
 def process_and_prepare_daily_data():
-    """Filtra y prepara los datos para el día de replay seleccionado. No descarga datos."""
+    """Filtra y prepara los datos para el día de replay seleccionado."""
     date_to_replay = st.session_state.ui_replay_start_date
     df_total_utc = st.session_state.all_data_utc
     
@@ -189,10 +190,11 @@ def process_and_prepare_daily_data():
     st.session_state.markers = []
     st.session_state.executor.closed_trades = []
     st.session_state.last_closed_trade_levels = {}
+    st.session_state.performance_metrics = {}
     st.session_state.app_fsm.transition_to(AppState.PAUSED)
 
 def close_position_manually():
-    """Función de callback para cerrar una posición abierta manualmente."""
+    """Cierra una posición manualmente y recalcula las métricas."""
     executor = st.session_state.executor
     if executor.account_fsm.is_in_state(TradeState.ACTIVE):
         idx = st.session_state.current_index
@@ -212,11 +214,16 @@ def close_position_manually():
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
+                st.session_state.performance_metrics = calculate_performance_metrics(
+                    st.session_state.session_trades,
+                    config.INITIAL_CAPITAL,
+                    st.session_state.executor.get_equity_history()
+                )
         
         st.toast("Posición cerrada manualmente.")
 
 def go_to_next_day():
-    """Encuentra el siguiente día con datos disponibles y cambia el replay a esa fecha."""
+    """Encuentra el siguiente día con datos y cambia el replay a esa fecha."""
     current_date = st.session_state.ui_replay_start_date
     all_dates = sorted(list(set(st.session_state.all_data_utc.index.tz_convert(st.session_state.ui_display_tz).date)))
     
@@ -295,23 +302,33 @@ elif st.session_state.app_fsm.state in [AppState.PAUSED, AppState.REPLAYING, App
 
     idx = st.session_state.current_index
     current_candle = df_replay.iloc[idx]
-    
     executor = st.session_state.executor
-    is_new_trade_opened = False
     
+    if not st.session_state.performance_metrics:
+        st.session_state.performance_metrics = calculate_performance_metrics(
+            st.session_state.session_trades, 
+            config.INITIAL_CAPITAL, 
+            executor.get_equity_history()
+        )
+
     if not st.session_state.app_fsm.is_in_state(AppState.FINISHED):
-        position_before = executor.account_fsm.state
-        
         historical_data_utc = st.session_state.all_data_utc[st.session_state.all_data_utc.index <= current_candle.name.tz_convert(pytz.utc)]
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
         signal = handle_signal_request(historical_data_utc, {k:v for k,v in levels.items() if pd.notna(v)})
-        
+
+        # --- LÓGICA DE APALANCAMIENTO MEJORADA ---
+        # Actualizar el apalancamiento solo si hay una señal de apertura y ha cambiado.
+        if isinstance(signal, dict) and signal.get('type') in ['BUY', 'SELL']:
+            if executor.leverage != st.session_state.ui_leverage:
+                executor.set_leverage(st.session_state.ui_leverage)
+                st.toast(f"Apalancamiento ajustado a {st.session_state.ui_leverage}x para la nueva operación.", icon="⚙️")
+        # --- FIN DE LA MEJORA ---
+
         result = executor.process_signal(signal, current_candle)
         
-        position_after = executor.account_fsm.state
-
         if result and 'marker' in result:
             st.session_state.markers.append(result['marker'])
+            
             if 'trade' in result:
                 st.session_state.session_trades.append(result['trade'])
                 trade_info = result['trade']
@@ -319,38 +336,44 @@ elif st.session_state.app_fsm.state in [AppState.PAUSED, AppState.REPLAYING, App
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
+                st.session_state.performance_metrics = calculate_performance_metrics(
+                    st.session_state.session_trades,
+                    config.INITIAL_CAPITAL,
+                    executor.get_equity_history()
+                )
                 if st.session_state.app_fsm.is_in_state(AppState.REPLAYING):
                     st.session_state.app_fsm.transition_to(AppState.PAUSED)
                     st.toast("Autoplay pausado por cierre de operación.")
             
-            if position_before == TradeState.FLAT and position_after == TradeState.ACTIVE:
-                st.session_state.last_closed_trade_levels = {} # Limpiar al abrir nueva operación
+            if executor.account_fsm.state == TradeState.ACTIVE and 'trade' not in result:
+                st.session_state.last_closed_trade_levels = {}
 
     col_metrics, col_chart = st.columns([1, 3])
     
     with col_metrics:
+        account_status_placeholder = st.empty()
+        performance_metrics_placeholder = st.empty()
+
+    with account_status_placeholder.container():
         st.subheader("Estado de Cuenta")
         equity = executor.get_equity(float(current_candle['close']))
-        
         initial_capital_dec = Decimal(str(config.INITIAL_CAPITAL))
         st.metric("Equity Actual", f"${equity:,.2f}", delta=f"{(equity - initial_capital_dec):,.2f}")
-        
         st.metric("Posición", f"{executor.account_fsm.state}")
         if executor.current_trade:
             trade = executor.current_trade
             st.metric("Entrada", f"{trade.direction} {trade.size} @ {trade.entry_price:.4f}")
             st.metric("SL Activo", f"{trade.current_sl_price:.4f}")
             st.metric("TP Activo", f"{trade.current_tp_price:.4f}")
-        
+
+    with performance_metrics_placeholder.container():
         st.divider()
         st.subheader("Métricas del Backtest")
-        metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
+        metrics = st.session_state.performance_metrics
         st.metric("Trades Totales", metrics.get("Total Trades", 0))
         st.metric("Win Rate (%)", f"{metrics.get('Win Rate (%)', 0.0):.2f}%")
-        
         pf_value = metrics.get('Profit Factor', 'N/A')
         st.metric("Profit Factor", f"{pf_value}")
-
         max_dd = metrics.get('Max Drawdown (%)', 0.0)
         st.metric("Max Drawdown (%)", f"{max_dd:.2f}%")
         
@@ -428,7 +451,7 @@ elif st.session_state.app_fsm.state in [AppState.PAUSED, AppState.REPLAYING, App
     if st.session_state.session_trades:
         trades_df = pd.DataFrame(st.session_state.session_trades)
         trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time']).dt.strftime('%H:%M:%S')
+        trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time']).dt.strftime('%Y-%m-%d %H:%M:%S')
         st.dataframe(trades_df[['entry_time', 'exit_time', 'direction', 'size', 'entry_price', 'exit_price', 'pnl_net', 'exit_reason', 'level_triggered']], use_container_width=True)
     else:
         st.text("No hay operaciones cerradas en esta sesión.")
