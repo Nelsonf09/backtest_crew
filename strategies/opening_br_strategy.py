@@ -24,6 +24,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         
         self.sl_method = self.params.get('sl_method', 'LOOKBACK_MIN_MAX').upper()
         self.sl_default_lookback_candles = max(1, int(self.params.get('sl_lookback', 2)) + 1)
+        self.sl_reduced_lookback_candles = 2
         self.risk_reward_ratio = self.params.get('risk_reward_ratio', 2.0)
 
         self.level_fsms = {}
@@ -33,7 +34,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         self.ema_alphas = {p: 2 / (p + 1) for p in self.ema_periods if isinstance(p, int) and p > 0}
         self.last_processed_timestamp = None
         
-        logger.debug("Estrategia OBR (FSM) inicializada.")
+        logger.debug("Estrategia OBR (FSM) inicializada con lógica de SL/TP detallada.")
 
     def reset(self):
         """ Resetea el estado completo de la estrategia. """
@@ -93,7 +94,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             self.level_fsms[level_name].state = State.INVALIDATED
             return 'HOLD'
 
-        sl_price = self._calculate_sl(signal_type, signal_info['break_info'], data, current_day_levels)
+        sl_price = self._calculate_sl(signal_type, signal_info['break_info'], level_name, data, current_day_levels)
         if pd.isna(sl_price):
             logger.warning(f"No se pudo calcular SL para la señal de {level_name}. Invalidando.")
             self.level_fsms[level_name].state = State.INVALIDATED
@@ -114,41 +115,105 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         for fsm in self.level_fsms.values(): fsm.state = State.SIGNAL_EMITTED
         return final_signal
 
-    def _calculate_sl(self, signal_type: str, break_info: dict, data: pd.DataFrame, current_day_levels: dict) -> float:
+    def _calculate_sl(self, signal_type: str, break_info: dict, level_name: str, data: pd.DataFrame, current_day_all_levels: dict) -> float:
+        """
+        Calcula el Stop Loss (SL) utilizando el timestamp para una referencia absoluta y evitar errores de contexto.
+        """
         try:
-            break_candle_time = break_info['break_time']
-            # --- CORRECCIÓN: Usar el índice numérico del día para localizar la vela ---
-            break_candle_idx_daily = break_info['break_candle_index']
-            break_candle = data.iloc[break_candle_idx_daily]
-            break_candle_open = float(break_candle['open'])
-
-            orh = current_day_levels.get('ORH')
-            orl = current_day_levels.get('ORL')
-
-            # --- Lógica de SL basada en la posición de la vela de ruptura ---
-            if orh is not None and orl is not None:
-                mid_point = (orh + orl) / 2.0
-                if signal_type == 'BUY' and break_candle_open < mid_point:
-                    logger.info(f"SL definido por regla de punto medio: Open de la vela de ruptura ({break_candle_open:.2f})")
-                    return break_candle_open
-                elif signal_type == 'SELL' and break_candle_open > mid_point:
-                    logger.info(f"SL definido por regla de punto medio: Open de la vela de ruptura ({break_candle_open:.2f})")
-                    return break_candle_open
-
-            # --- Lógica de SL por defecto (si la nueva regla no aplica) ---
-            logger.info("Usando método de SL por defecto (lookback).")
-            start_idx_daily = max(0, break_candle_idx_daily - (self.sl_default_lookback_candles - 1))
+            sl_price = np.nan
+            break_time = break_info.get('break_time')
             
-            lookback_candles = data.iloc[start_idx_daily : break_candle_idx_daily + 1]
+            if break_time is None:
+                logger.error("OBR Signal: No se encontró 'break_time' en break_info. No se puede calcular SL.")
+                return np.nan
             
-            if lookback_candles.empty:
-                logger.warning("No se encontraron velas de lookback para el SL.")
+            # --- CORRECCIÓN CLAVE: Usar get_loc para encontrar el índice global a partir del timestamp ---
+            try:
+                break_idx_global = data.index.get_loc(break_time)
+            except KeyError:
+                logger.error(f"OBR Signal: No se pudo encontrar el timestamp de ruptura {break_time} en el índice del historial de datos.")
                 return np.nan
 
-            return float(lookback_candles['low'].min()) if signal_type == 'BUY' else float(lookback_candles['high'].max())
-        
+            sl_method_to_use = self.sl_method
+
+            if sl_method_to_use == 'LOOKBACK_MIN_MAX':
+                # Usar el índice global para el slicing
+                start_idx_default = max(0, break_idx_global - (self.sl_default_lookback_candles - 1))
+                end_idx = break_idx_global + 1
+                candles_default = data.iloc[start_idx_default:end_idx]
+                sl_price_default_lookback = np.nan
+
+                if not candles_default.empty:
+                    lows = pd.to_numeric(candles_default['low'], errors='coerce')
+                    highs = pd.to_numeric(candles_default['high'], errors='coerce')
+                    if signal_type == 'BUY':
+                        sl_price_default_lookback = lows.min()
+                    else:
+                        sl_price_default_lookback = highs.max()
+                else:
+                    logger.warning(f"OBR SL LOOKBACK: No hay velas en rango [{start_idx_default}:{end_idx}].")
+
+                if pd.notna(sl_price_default_lookback):
+                    sl_price = sl_price_default_lookback
+                else:
+                    logger.warning(f"OBR SL LOOKBACK: SL calculado es NaN. Fallback a BREAK_LOW_HIGH.")
+                    sl_method_to_use = 'BREAK_LOW_HIGH'
+
+                # Lógica de ajuste para niveles ORH/ORL (sin cambios)
+                if sl_method_to_use == 'LOOKBACK_MIN_MAX' and pd.notna(sl_price) and level_name in ['ORH', 'ORL']:
+                    orh_val_levels = current_day_all_levels.get('ORH')
+                    orl_val_levels = current_day_all_levels.get('ORL')
+                    
+                    if (orh_val_levels is not None and orl_val_levels is not None and
+                        pd.notna(orh_val_levels) and pd.notna(orl_val_levels) and
+                        isinstance(orh_val_levels, numbers.Number) and isinstance(orl_val_levels, numbers.Number) and
+                        orh_val_levels > orl_val_levels):
+                        
+                        or_midpoint = (float(orh_val_levels) + float(orl_val_levels)) / 2.0
+                        reduce_lookback = False
+                        
+                        if signal_type == 'BUY' and sl_price < or_midpoint:
+                            reduce_lookback = True
+                            logger.info(f"OBR SL Adjust (BUY): SL default {sl_price:.4f} < OR Mid {or_midpoint:.4f}.")
+                        elif signal_type == 'SELL' and sl_price > or_midpoint:
+                            reduce_lookback = True
+                            logger.info(f"OBR SL Adjust (SELL): SL default {sl_price:.4f} > OR Mid {or_midpoint:.4f}.")
+
+                        if reduce_lookback:
+                            start_idx_reduced = max(0, break_idx_global - (self.sl_reduced_lookback_candles - 1))
+                            candles_reduced = data.iloc[start_idx_reduced:end_idx]
+                            sl_price_reduced_lookback = np.nan
+                            
+                            if not candles_reduced.empty:
+                                lows_r = pd.to_numeric(candles_reduced['low'], errors='coerce')
+                                highs_r = pd.to_numeric(candles_reduced['high'], errors='coerce')
+                                if signal_type == 'BUY':
+                                    sl_price_reduced_lookback = lows_r.min()
+                                else:
+                                    sl_price_reduced_lookback = highs_r.max()
+                                
+                                if pd.notna(sl_price_reduced_lookback):
+                                    sl_price = sl_price_reduced_lookback
+                                    logger.info(f"OBR SL Adjust: Nuevo SL ({self.sl_reduced_lookback_candles} velas): {sl_price:.4f}")
+                                else:
+                                    logger.warning(f"OBR SL Adjust: Falló cálculo reducido. Mantiene SL default: {sl_price:.4f}")
+                            else:
+                                logger.warning(f"OBR SL Adjust: No hay velas para lookback reducido [{start_idx_reduced}:{end_idx}]. Mantiene SL default: {sl_price:.4f}")
+
+            if sl_method_to_use == 'BREAK_LOW_HIGH':
+                if signal_type == 'BUY':
+                    sl_price = float(break_info.get('break_candle_low', np.nan))
+                else:
+                    sl_price = float(break_info.get('break_candle_high', np.nan))
+
+            if pd.isna(sl_price):
+                logger.error(f"OBR Signal: SL final es NaN para {level_name} ({sl_method_to_use}).")
+                return np.nan
+            
+            return float(sl_price)
+
         except Exception as e:
-            logger.error(f"Error calculando SL: {e}", exc_info=True)
+            logger.error(f"Error fatal calculando SL para {level_name}: {e}", exc_info=True)
             return np.nan
 
     def _passes_ema_filter(self, signal_type: str, price: float, ema_values: dict) -> bool:
