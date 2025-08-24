@@ -48,6 +48,7 @@ def initialize_session_state():
     st.session_state.session_trades = []
     st.session_state.performance_metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
+    # RESTAURADO: Volvemos a usar df_context_display para mantener la separación original
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
     st.session_state.current_index = 0
@@ -130,34 +131,44 @@ def process_global_backtesting():
             df_day = df_full[df_full.index.date == date_obj]
             if df_day.empty: continue
 
+            orh, orl = np.nan, np.nan
             try:
                 or_start_time = tz_handler.market_open_time
                 or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
                 or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
                 or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
                 if not or_candles.empty:
-                    levels['ORH'], levels['ORL'] = or_candles['high'].max(), or_candles['low'].min()
+                    orh, orl = or_candles['high'].max(), or_candles['low'].min()
+                    levels['ORH'], levels['ORL'] = orh, orl
             except Exception as e:
                 logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
 
             levels_data = [(k, v) for k, v in levels.items() if pd.notna(v)]
             if not levels_data: continue
             
-            level_names = np.array([str(item[0]) for item in levels_data])
-            level_prices = np.array([item[1] for item in levels_data], dtype=np.float64)
-            level_dirs = np.array([1 if 'H' in name else -1 for name in level_names], dtype=np.int8)
+            level_name_map = {'ORH': 1, 'ORL': 2, 'PDH': 3, 'PDL': 4, 'PMH': 5, 'PML': 6}
+            level_names_numeric = np.array([level_name_map.get(item[0], 0) for item in levels_data], dtype=np.int32)
             
+            level_prices = np.array([item[1] for item in levels_data], dtype=np.float64)
+            level_dirs = np.array([1 if 'H' in name else -1 for name, _ in levels_data], dtype=np.int8)
+            level_ranges = np.array([config.LEVEL_RANGES.get(name, 0.0) for name, _ in levels_data], dtype=np.float64)
+
             ema_mode_map = {"Desactivado": 0, "Moderado": 1, "Fuerte": 2}
             ema_filter_mode = ema_mode_map.get(st.session_state.ui_ema_filter, 0)
 
             trades, equity_hist = run_fast_backtest(
                 df_day['open'].to_numpy(dtype=np.float64), df_day['high'].to_numpy(dtype=np.float64),
                 df_day['low'].to_numpy(dtype=np.float64), df_day['close'].to_numpy(dtype=np.float64),
-                df_day.index.values.astype(np.int64) // 10**9, df_day.index.hour.to_numpy(dtype=np.int8),
-                df_day.index.minute.to_numpy(dtype=np.int8), level_names, level_prices, level_dirs,
-                max_retest_candles=15, risk_reward_ratio=2.0, sl_lookback=2,
+                df_day.index.values.astype(np.int64) // 10**9, 
+                df_day.index.hour.to_numpy(dtype=np.int8),
+                df_day.index.minute.to_numpy(dtype=np.int8),
+                level_names_numeric, level_prices, level_dirs,
+                max_retest_candles=15, risk_reward_ratio=2.0,
+                sl_default_lookback=3, sl_reduced_lookback=2,
+                level_ranges=level_ranges, orh_price=orh, orl_price=orl,
                 initial_capital=config.INITIAL_CAPITAL, commission_per_side=config.COMMISSION_PER_TRADE,
-                leverage=float(st.session_state.ui_leverage), ema_filter_mode=ema_filter_mode,
+                leverage=float(st.session_state.ui_leverage),
+                ema_filter_mode=ema_filter_mode,
                 ema_periods=np.array([9, 21, 50], dtype=np.float64)
             )
             
@@ -208,20 +219,24 @@ def process_loading_state_visual():
     with st.spinner("Conectando a IB..."):
         if not dm.connect_ib(): st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
     try:
+        # --- LÓGICA DE CARGA RESTAURADA ---
+        # Ahora, la fecha de inicio de la descarga se ajusta para incluir siempre el lookback
+        lookback_days = datetime.timedelta(days=7) # Un lookback generoso
+        adjusted_download_start = st.session_state.ui_download_start - lookback_days
+        
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
             st.session_state.all_data_utc = dm.get_main_data(
                 symbol=st.session_state.ui_symbol, timeframe=st.session_state.ui_timeframe,
                 sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
                 currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth,
                 what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=st.session_state.ui_download_start,
+                download_start_date=adjusted_download_start, # Usar fecha ajustada
                 download_end_date=st.session_state.ui_download_end,
                 use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
             )
         if st.session_state.all_data_utc.empty: st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
         st.session_state.app_fsm.transition_to(AppState.READY)
     except Exception as e: st.error(f"Error cargando datos: {e}"); st.session_state.app_fsm.transition_to(AppState.ERROR)
-    # NO desconectar aquí, se hará en 'prepare_daily_data'
 
 def process_and_prepare_daily_data_visual():
     date_to_replay = st.session_state.ui_replay_start_date
@@ -244,13 +259,19 @@ def process_and_prepare_daily_data_visual():
         finally:
             dm.disconnect_ib()
 
+    # --- LÓGICA RESTAURADA PARA SEPARAR CONTEXTO Y REPLAY ---
     st.session_state.tz_handler.set_display_timezone(st.session_state.ui_display_tz)
     start_utc = st.session_state.tz_handler.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.min)).astimezone(pytz.utc)
     end_utc = st.session_state.tz_handler.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.max)).astimezone(pytz.utc)
+    
+    # El contexto son todos los datos ANTES del día de replay
     df_context_utc = st.session_state.all_data_utc[st.session_state.all_data_utc.index < start_utc]
+    # El replay son solo los datos DEL día de replay
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
-    st.session_state.df_context_display = apply_timezone_fixes(st.session_state, df_context_utc, st.session_state.ui_display_tz, True)
-    st.session_state.df_replay_display = apply_timezone_fixes(st.session_state, df_replay_utc, st.session_state.ui_display_tz, True)
+    
+    st.session_state.df_context_display = apply_timezone_fixes(st.session_state, df_context_utc, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
+    st.session_state.df_replay_display = apply_timezone_fixes(st.session_state, df_replay_utc, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
+    
     if not st.session_state.df_replay_display.empty:
         try:
             or_start_time = st.session_state.tz_handler.market_open_time
@@ -260,8 +281,11 @@ def process_and_prepare_daily_data_visual():
             if not or_candles.empty: st.session_state.opening_levels = {'ORH': or_candles['high'].max(), 'ORL': or_candles['low'].min()}
             else: st.session_state.opening_levels = {}
         except Exception as e: logger.error(f"Error calculando ORH/ORL: {e}"); st.session_state.opening_levels = {}
-    st.session_state.current_index, st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = 0, [], [], {}
+    
+    st.session_state.current_index = 0
+    st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = [], [], {}
     st.session_state.app_fsm.transition_to(AppState.PAUSED)
+
 
 def close_position_manually_visual():
     executor = st.session_state.executor
@@ -343,18 +367,14 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
 
     if not fsm.is_in_state(AppState.FINISHED):
-        # --- LÓGICA DE SEÑAL Y EJECUCIÓN CORREGIDA ---
-        # 1. Construir el dataframe histórico que la estrategia verá
-        # Se asegura de que se pase el historial completo (contexto + replay actual)
+        # --- LÓGICA RESTAURADA PARA PASAR DATOS A LA ESTRATEGIA ---
         dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
         df_hist_context = pd.concat(dfs_to_concat_hist) if dfs_to_concat_hist else pd.DataFrame()
 
-        # 2. Convertir a UTC para la estrategia (que opera en UTC)
         historical_data_utc = df_hist_context.tz_convert(pytz.utc)
 
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
         
-        # 3. Obtener la señal de la estrategia
         signal = handle_signal_request(
             historical_data=historical_data_utc, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
@@ -362,10 +382,8 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
             daily_candle_index=idx
         )
         
-        # 4. Procesar la señal con el simulador de ejecución
         result = executor.process_signal(signal, current_candle)
         
-        # 5. Actualizar la UI con el resultado
         if result and 'marker' in result:
             st.session_state.markers.append(result['marker'])
             if 'trade' in result:
@@ -379,8 +397,6 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
                 if fsm.is_in_state(AppState.REPLAYING): fsm.transition_to(AppState.PAUSED); st.toast("Autoplay pausado.")
             else:
                 st.session_state.last_closed_trade_levels = {}
-        # --- FIN DE LA LÓGICA ---
-
 
     col_metrics, col_chart = st.columns([1, 3])
     with col_metrics:
@@ -415,6 +431,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         
         hover_info_placeholder = st.empty()
 
+        # --- LÓGICA RESTAURADA PARA EL RENDERIZADO DEL GRÁFICO ---
         dfs_to_concat = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
         if dfs_to_concat:
             df_combined = pd.concat(dfs_to_concat)

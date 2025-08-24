@@ -26,10 +26,11 @@ def prepare_chart_data_and_options(df_display: pd.DataFrame, markers: list = [],
 
     local_tz = pytz.timezone(timezone_str)
     if df_display.index.tz is None:
-        df_display.index = df_display.index.tz_localize(local_tz, ambiguous='infer')
+        df_display = df_display.tz_localize(local_tz, ambiguous='infer')
     elif str(df_display.index.tz) != str(local_tz):
          df_display = df_display.tz_convert(local_tz)
 
+    # --- CÓDIGO VISUAL RESTAURADO A LA VERSIÓN ORIGINAL Y FUNCIONAL ---
     chart_options = { "height": chart_height, "layout": {"background": {"type": "solid", "color": '#131722'}, "textColor": '#D9D9D9'},
                       "grid": {"vertLines": {"visible": False}, "horzLines": {"color": '#3C4043'}},
                       "timeScale": {"rightOffset": 12, "secondsVisible": True, "timeVisible": True, "borderColor": '#485158', "fitContent": fit_content, "barSpacing": 10},
@@ -84,7 +85,6 @@ def prepare_chart_data_and_options(df_display: pd.DataFrame, markers: list = [],
                 line_opts = { "color": style['c'], "lineWidth": 1, "lineStyle": style['ls'], "priceLineVisible": False, "lastValueVisible": False, "crosshairMarkerVisible": False, "title": f"{style['t']} {price_float:.2f}" }
                 series_data_list.append({"type": "Line", "data": line_data, "options": line_opts})
                 
-                # --- LÓGICA RESTAURADA PARA RANGOS ---
                 range_val = level_ranges.get(level_name) if level_ranges and style.get('rc') else None
                 if range_val:
                      range_f = float(range_val)
