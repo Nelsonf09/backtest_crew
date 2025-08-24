@@ -1,19 +1,19 @@
-# requirements.txt
-
-# --- Core de la App ---
+requirements.txt
+--- Core de la App ---
 streamlit
 pandas
 numpy
 pytz
 ib_insync
 python-dotenv
+numba  # <-- AÑADIDO PARA EL MOTOR RÁPIDO
 
-# --- Librerías de IA Principales ---
-# Dejamos que crewai gestione sus propias dependencias de langchain
+--- Librerías de IA Principales ---
+Dejamos que crewai gestione sus propias dependencias de langchain
 crewai
 crewai-tools
 langchain-ollama
 
-# --- Dependencias Adicionales ---
+--- Dependencias Adicionales ---
 chromadb
 streamlit-lightweight-charts
