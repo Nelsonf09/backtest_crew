@@ -170,11 +170,18 @@ class ExecutionSimulator:
             logger.warning("Cash insuficiente para cubrir la comisión de entrada.")
             return None
         
+        # --- LÓGICA DE SL/TP SIMPLIFICADA ---
+        # Ahora se confía 100% en los valores que vienen del diccionario de la señal.
+        sl_price = quantize(signal_data.get('sl_price'))
+        tp_price = quantize(signal_data.get('tp1_price'))
+
+        if sl_price.is_nan() or tp_price.is_nan():
+            logger.error(f"Señal para abrir posición recibida sin SL/TP válidos. SL: {sl_price}, TP: {tp_price}. No se abre trade.")
+            return None
+        # --- FIN DE LA SIMPLIFICACIÓN ---
+
         self.cash -= self.commission_per_side
         self.account_fsm.transition_to(TradeState.ACTIVE)
-
-        sl_price = quantize(signal_data.get('sl_price', Decimal('NaN')))
-        tp_price = quantize(signal_data.get('tp1_price', Decimal('NaN')))
         
         self.current_trade = Trade(
             direction='LONG' if signal_type == 'BUY' else 'SHORT',

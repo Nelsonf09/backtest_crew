@@ -272,9 +272,15 @@ def close_position_manually_visual():
             result['marker']['text'] = f"MANUAL_CLOSE ({result['marker']['text']})"
             st.session_state.markers.append(result['marker'])
             if 'trade' in result:
-                st.session_state.session_trades.append(result['trade'])
+                trade_info = result['trade']
+                st.session_state.session_trades.append(trade_info)
+                st.session_state.last_closed_trade_levels = {
+                    'SL': trade_info.get('sl_at_entry'),
+                    'TP': trade_info.get('tp_at_entry')
+                }
                 st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
         st.toast("Posición cerrada manualmente.")
+
 
 def go_to_next_day_visual():
     current_date = st.session_state.ui_replay_start_date
@@ -337,23 +343,44 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
 
     if not fsm.is_in_state(AppState.FINISHED):
-        # --- CORRECCIÓN: Pasar el índice diario para logs correctos ---
-        historical_data_utc = st.session_state.all_data_utc[st.session_state.all_data_utc.index <= current_candle.name.tz_convert(pytz.utc)]
+        # --- LÓGICA DE SEÑAL Y EJECUCIÓN CORREGIDA ---
+        # 1. Construir el dataframe histórico que la estrategia verá
+        # Se asegura de que se pase el historial completo (contexto + replay actual)
+        dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
+        df_hist_context = pd.concat(dfs_to_concat_hist) if dfs_to_concat_hist else pd.DataFrame()
+
+        # 2. Convertir a UTC para la estrategia (que opera en UTC)
+        historical_data_utc = df_hist_context.tz_convert(pytz.utc)
+
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
+        
+        # 3. Obtener la señal de la estrategia
         signal = handle_signal_request(
             historical_data=historical_data_utc, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
             ema_filter_mode=st.session_state.ui_ema_filter,
-            daily_candle_index=idx # <-- Pasar el índice del día
+            daily_candle_index=idx
         )
-        # --- FIN DE LA CORRECCIÓN ---
+        
+        # 4. Procesar la señal con el simulador de ejecución
         result = executor.process_signal(signal, current_candle)
+        
+        # 5. Actualizar la UI con el resultado
         if result and 'marker' in result:
             st.session_state.markers.append(result['marker'])
             if 'trade' in result:
-                st.session_state.session_trades.append(result['trade'])
+                trade_info = result['trade']
+                st.session_state.session_trades.append(trade_info)
+                st.session_state.last_closed_trade_levels = {
+                    'SL': trade_info.get('sl_at_entry'),
+                    'TP': trade_info.get('tp_at_entry')
+                }
                 st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
                 if fsm.is_in_state(AppState.REPLAYING): fsm.transition_to(AppState.PAUSED); st.toast("Autoplay pausado.")
+            else:
+                st.session_state.last_closed_trade_levels = {}
+        # --- FIN DE LA LÓGICA ---
+
 
     col_metrics, col_chart = st.columns([1, 3])
     with col_metrics:
@@ -388,10 +415,20 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         
         hover_info_placeholder = st.empty()
 
-        df_to_render = pd.concat([st.session_state.df_context_display, df_replay.iloc[:idx+1]]) if st.session_state.ui_mostrar_todo else pd.concat([st.session_state.df_context_display, df_replay.iloc[:idx+1]]).iloc[-st.session_state.ui_velas_atras:]
+        dfs_to_concat = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
+        if dfs_to_concat:
+            df_combined = pd.concat(dfs_to_concat)
+        else:
+            df_combined = pd.DataFrame(columns=df_replay.columns)
+
+        df_to_render = df_combined if st.session_state.ui_mostrar_todo else df_combined.iloc[-st.session_state.ui_velas_atras:]
+        
         levels_for_chart = {**st.session_state.static_levels, **st.session_state.opening_levels}
-        if executor.current_trade: levels_for_chart['SL'], levels_for_chart['TP'] = float(executor.current_trade.current_sl_price), float(executor.current_trade.current_tp_price)
-        else: levels_for_chart.update(st.session_state.last_closed_trade_levels)
+        if executor.current_trade:
+            levels_for_chart['SL'] = float(executor.current_trade.current_sl_price)
+            levels_for_chart['TP'] = float(executor.current_trade.current_tp_price)
+        else:
+            levels_for_chart.update(st.session_state.last_closed_trade_levels)
         
         chart_options, series_data = prepare_chart_data_and_options(df_display=df_to_render, markers=st.session_state.markers, static_levels=levels_for_chart, timezone_str=st.session_state.ui_display_tz, level_ranges=config.LEVEL_RANGES)
         

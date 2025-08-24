@@ -75,17 +75,16 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         ema_values = self._update_emas(data)
         current_candle, previous_candle = data.iloc[-1], data.iloc[-2]
         
-        # --- CORRECCIÓN: Usar el índice diario si está disponible ---
         current_candle_idx = daily_candle_index if daily_candle_index != -1 else len(data) - 1
         
         for level_name, fsm in self.level_fsms.items():
             if fsm.state not in [State.SIGNAL_EMITTED, State.INVALIDATED]:
                 signal_info = fsm.process_candle(current_candle, previous_candle, current_candle_idx)
                 if signal_info:
-                    return self._process_fsm_signal(signal_info, level_name, data, ema_values)
+                    return self._process_fsm_signal(signal_info, level_name, data, ema_values, current_day_levels)
         return 'HOLD'
 
-    def _process_fsm_signal(self, signal_info: dict, level_name: str, data: pd.DataFrame, ema_values: dict) -> str | dict:
+    def _process_fsm_signal(self, signal_info: dict, level_name: str, data: pd.DataFrame, ema_values: dict, current_day_levels: dict) -> str | dict:
         direction = self.level_fsms[level_name].direction
         signal_type = 'BUY' if direction == 'up' else 'SELL'
 
@@ -94,7 +93,7 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             self.level_fsms[level_name].state = State.INVALIDATED
             return 'HOLD'
 
-        sl_price = self._calculate_sl(signal_type, signal_info['break_info'], data)
+        sl_price = self._calculate_sl(signal_type, signal_info['break_info'], data, current_day_levels)
         if pd.isna(sl_price):
             logger.warning(f"No se pudo calcular SL para la señal de {level_name}. Invalidando.")
             self.level_fsms[level_name].state = State.INVALIDATED
@@ -102,6 +101,11 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             
         entry_price = signal_info['retest_price']
         risk_distance = abs(entry_price - sl_price)
+        if risk_distance < 1e-9:
+             logger.warning(f"Distancia de riesgo es cero para {level_name}. Invalidando señal.")
+             self.level_fsms[level_name].state = State.INVALIDATED
+             return 'HOLD'
+
         tp_price = entry_price + (risk_distance * self.risk_reward_ratio) if signal_type == 'BUY' else entry_price - (risk_distance * self.risk_reward_ratio)
 
         final_signal = {'type': signal_type, 'sl_price': float(sl_price), 'tp1_price': float(tp_price), 'level': level_name, 'emas': ema_values}
@@ -110,15 +114,42 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         for fsm in self.level_fsms.values(): fsm.state = State.SIGNAL_EMITTED
         return final_signal
 
-    def _calculate_sl(self, signal_type: str, break_info: dict, data: pd.DataFrame) -> float:
-        break_idx = break_info['break_candle_index']
-        if self.sl_method == 'LOOKBACK_MIN_MAX':
-            start_idx = max(0, break_idx - (self.sl_default_lookback_candles - 1))
-            lookback_candles = data.iloc[start_idx : break_idx + 1]
+    def _calculate_sl(self, signal_type: str, break_info: dict, data: pd.DataFrame, current_day_levels: dict) -> float:
+        try:
+            break_candle_time = break_info['break_time']
+            # --- CORRECCIÓN: Usar el índice numérico del día para localizar la vela ---
+            break_candle_idx_daily = break_info['break_candle_index']
+            break_candle = data.iloc[break_candle_idx_daily]
+            break_candle_open = float(break_candle['open'])
+
+            orh = current_day_levels.get('ORH')
+            orl = current_day_levels.get('ORL')
+
+            # --- Lógica de SL basada en la posición de la vela de ruptura ---
+            if orh is not None and orl is not None:
+                mid_point = (orh + orl) / 2.0
+                if signal_type == 'BUY' and break_candle_open < mid_point:
+                    logger.info(f"SL definido por regla de punto medio: Open de la vela de ruptura ({break_candle_open:.2f})")
+                    return break_candle_open
+                elif signal_type == 'SELL' and break_candle_open > mid_point:
+                    logger.info(f"SL definido por regla de punto medio: Open de la vela de ruptura ({break_candle_open:.2f})")
+                    return break_candle_open
+
+            # --- Lógica de SL por defecto (si la nueva regla no aplica) ---
+            logger.info("Usando método de SL por defecto (lookback).")
+            start_idx_daily = max(0, break_candle_idx_daily - (self.sl_default_lookback_candles - 1))
+            
+            lookback_candles = data.iloc[start_idx_daily : break_candle_idx_daily + 1]
+            
+            if lookback_candles.empty:
+                logger.warning("No se encontraron velas de lookback para el SL.")
+                return np.nan
+
             return float(lookback_candles['low'].min()) if signal_type == 'BUY' else float(lookback_candles['high'].max())
-        elif self.sl_method == 'BREAK_LOW_HIGH':
-            return break_info['break_candle_low'] if signal_type == 'BUY' else break_info['break_candle_high']
-        return np.nan
+        
+        except Exception as e:
+            logger.error(f"Error calculando SL: {e}", exc_info=True)
+            return np.nan
 
     def _passes_ema_filter(self, signal_type: str, price: float, ema_values: dict) -> bool:
         if not self.use_ema_filter: return True

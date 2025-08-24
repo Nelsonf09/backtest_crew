@@ -28,7 +28,9 @@ def calculate_ib_duration(start_date: datetime.date, end_date: datetime.date) ->
 class DataManager:
     """ Gestiona conexión IB (con FSM), datos históricos, caché y niveles clave. """
     def __init__(self):
-        self.ib = IB()
+        # --- LÍNEA MODIFICADA ---
+        # Se inicializa como None para asegurar que se cree una nueva instancia en cada conexión.
+        self.ib = None
         self.config = config
         self.cache_dir = getattr(config, 'CACHE_DIR', Path('cache').resolve())
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +60,10 @@ class DataManager:
 
         self.connection_fsm.transition_to(ConnectionState.CONNECTING)
         try:
+            # --- LÍNEA AÑADIDA ---
+            # Se crea una nueva instancia de IB para asegurar una conexión limpia.
+            self.ib = IB()
+
             host = getattr(self.config, 'IB_HOST', '127.0.0.1')
             port = getattr(self.config, 'IB_PORT', 7497)
             client_id = getattr(self.config, 'IB_CLIENT_ID', 1)
@@ -86,7 +92,9 @@ class DataManager:
             return
         
         self.connection_fsm.transition_to(ConnectionState.DISCONNECTING)
-        if self.ib.isConnected():
+        # --- LÍNEA MODIFICADA ---
+        # Se verifica que el objeto 'ib' exista antes de intentar la desconexión.
+        if self.ib and self.ib.isConnected():
             self.ib.disconnect()
         self.connection_fsm.transition_to(ConnectionState.DISCONNECTED)
         logger.info("Desconexión IB OK.")
