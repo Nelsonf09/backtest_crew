@@ -48,7 +48,6 @@ def initialize_session_state():
     st.session_state.session_trades = []
     st.session_state.performance_metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
-    # RESTAURADO: Volvemos a usar df_context_display para mantener la separación original
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
     st.session_state.current_index = 0
@@ -219,9 +218,7 @@ def process_loading_state_visual():
     with st.spinner("Conectando a IB..."):
         if not dm.connect_ib(): st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
     try:
-        # --- LÓGICA DE CARGA RESTAURADA ---
-        # Ahora, la fecha de inicio de la descarga se ajusta para incluir siempre el lookback
-        lookback_days = datetime.timedelta(days=7) # Un lookback generoso
+        lookback_days = datetime.timedelta(days=7)
         adjusted_download_start = st.session_state.ui_download_start - lookback_days
         
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
@@ -230,7 +227,7 @@ def process_loading_state_visual():
                 sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
                 currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth,
                 what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=adjusted_download_start, # Usar fecha ajustada
+                download_start_date=adjusted_download_start,
                 download_end_date=st.session_state.ui_download_end,
                 use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
             )
@@ -259,14 +256,11 @@ def process_and_prepare_daily_data_visual():
         finally:
             dm.disconnect_ib()
 
-    # --- LÓGICA RESTAURADA PARA SEPARAR CONTEXTO Y REPLAY ---
     st.session_state.tz_handler.set_display_timezone(st.session_state.ui_display_tz)
     start_utc = st.session_state.tz_handler.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.min)).astimezone(pytz.utc)
     end_utc = st.session_state.tz_handler.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.max)).astimezone(pytz.utc)
     
-    # El contexto son todos los datos ANTES del día de replay
     df_context_utc = st.session_state.all_data_utc[st.session_state.all_data_utc.index < start_utc]
-    # El replay son solo los datos DEL día de replay
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
     
     st.session_state.df_context_display = apply_timezone_fixes(st.session_state, df_context_utc, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
@@ -313,9 +307,7 @@ def go_to_next_day_visual():
     if next_day: st.session_state.ui_replay_start_date = next_day; st.session_state.app_fsm.transition_to(AppState.READY)
     else: st.toast("No hay más días con datos.")
 
-if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
-    if st.session_state.ui_replay_start_date < st.session_state.ui_download_start: st.session_state.ui_replay_start_date = st.session_state.ui_download_start
-    if st.session_state.ui_replay_start_date > st.session_state.ui_download_end: st.session_state.ui_replay_start_date = st.session_state.ui_download_end
+# --- BLOQUE DE CÓDIGO PROBLEMÁTICO ELIMINADO DE AQUÍ ---
 
 with st.sidebar:
     st.title("Configuración")
@@ -341,6 +333,15 @@ with st.sidebar:
     if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
         st.selectbox("Timeframe", options=['1 min', '3 mins', '5 mins'], key="ui_timeframe")
         st.date_input("Día de Replay", key="ui_replay_start_date", min_value=st.session_state.ui_download_start, max_value=st.session_state.ui_download_end)
+        
+        # --- INICIO DE LA CORRECCIÓN ---
+        # La validación de la fecha de replay se hace aquí, DESPUÉS de que el widget ha sido creado.
+        if st.session_state.ui_replay_start_date < st.session_state.ui_download_start:
+            st.session_state.ui_replay_start_date = st.session_state.ui_download_start
+        if st.session_state.ui_replay_start_date > st.session_state.ui_download_end:
+            st.session_state.ui_replay_start_date = st.session_state.ui_download_end
+        # --- FIN DE LA CORRECCIÓN ---
+
         st.divider()
         st.subheader("Controles de Replay")
         st.number_input("Velocidad Autoplay (s)", 0.1, 5.0, 0.5, 0.1, key="ui_autoplay_speed")
@@ -367,7 +368,6 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
 
     if not fsm.is_in_state(AppState.FINISHED):
-        # --- LÓGICA RESTAURADA PARA PASAR DATOS A LA ESTRATEGIA ---
         dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
         df_hist_context = pd.concat(dfs_to_concat_hist) if dfs_to_concat_hist else pd.DataFrame()
 
@@ -431,7 +431,6 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         
         hover_info_placeholder = st.empty()
 
-        # --- LÓGICA RESTAURADA PARA EL RENDERIZADO DEL GRÁFICO ---
         dfs_to_concat = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
         if dfs_to_concat:
             df_combined = pd.concat(dfs_to_concat)
@@ -458,9 +457,10 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
             if hovered_timestamp:
                 try:
                     hovered_dt = pd.to_datetime(hovered_timestamp, unit='s', utc=True).tz_convert(st.session_state.ui_display_tz)
-                    hovered_candle_index = df_replay.index.get_indexer([hovered_dt], method='nearest')[0]
-                    if hovered_candle_index != -1:
-                        hover_info_placeholder.caption(f"<div style='text-align:center; font-style: italic;'>Vela bajo cursor: #{hovered_candle_index + 1}</div>", unsafe_allow_html=True)
+                    actual_ts = df_to_render.index[df_to_render.index.get_indexer([hovered_dt], method='nearest')[0]]
+                    hovered_candle_index_in_day = df_replay.index.get_loc(actual_ts)
+                    hover_daily_idx = hovered_candle_index_in_day + 1
+                    hover_info_placeholder.caption(f"<div style='text-align:center; font-style: italic;'>Vela bajo cursor: #{hover_daily_idx}</div>", unsafe_allow_html=True)
                 except Exception:
                     pass
 
