@@ -1,10 +1,8 @@
 # strategies/opening_br_strategy.py
 import pandas as pd
 import logging
-import datetime
-import pytz
-import numbers
 import numpy as np
+import numbers
 
 from .base_strategy import BaseStrategy
 from .level_fsm import LevelFSM, State # Importamos la FSM
@@ -37,11 +35,14 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         logger.debug("Estrategia OBR (FSM) inicializada con lógica de SL/TP detallada.")
 
     def reset(self):
-        """ Resetea el estado completo de la estrategia. """
+        """ Resetea el estado completo de la estrategia, incluyendo las FSMs y las EMAs. """
         self.level_fsms = {}
         self.last_levels_processed = None
+        # --- INICIO DE LA CORRECCIÓN ---
+        # Se resetea el estado de las EMAs para asegurar que cada día comience limpio.
         self.last_ema_values = {}
         self.last_processed_timestamp = None
+        # --- FIN DE LA CORRECCIÓN ---
         logger.debug("Estrategia OBR (FSM) reseteada.")
 
     def _initialize_fsms(self, current_day_levels: dict):
@@ -116,9 +117,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         return final_signal
 
     def _calculate_sl(self, signal_type: str, break_info: dict, level_name: str, data: pd.DataFrame, current_day_all_levels: dict) -> float:
-        """
-        Calcula el Stop Loss (SL) utilizando el timestamp para una referencia absoluta y evitar errores de contexto.
-        """
         try:
             sl_price = np.nan
             break_time = break_info.get('break_time')
@@ -127,7 +125,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
                 logger.error("OBR Signal: No se encontró 'break_time' en break_info. No se puede calcular SL.")
                 return np.nan
             
-            # --- CORRECCIÓN CLAVE: Usar get_loc para encontrar el índice global a partir del timestamp ---
             try:
                 break_idx_global = data.index.get_loc(break_time)
             except KeyError:
@@ -137,7 +134,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             sl_method_to_use = self.sl_method
 
             if sl_method_to_use == 'LOOKBACK_MIN_MAX':
-                # Usar el índice global para el slicing
                 start_idx_default = max(0, break_idx_global - (self.sl_default_lookback_candles - 1))
                 end_idx = break_idx_global + 1
                 candles_default = data.iloc[start_idx_default:end_idx]
@@ -159,7 +155,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
                     logger.warning(f"OBR SL LOOKBACK: SL calculado es NaN. Fallback a BREAK_LOW_HIGH.")
                     sl_method_to_use = 'BREAK_LOW_HIGH'
 
-                # Lógica de ajuste para niveles ORH/ORL (sin cambios)
                 if sl_method_to_use == 'LOOKBACK_MIN_MAX' and pd.notna(sl_price) and level_name in ['ORH', 'ORL']:
                     orh_val_levels = current_day_all_levels.get('ORH')
                     orl_val_levels = current_day_all_levels.get('ORL')

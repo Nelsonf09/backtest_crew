@@ -32,7 +32,7 @@ from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.metrics import calculate_performance_metrics
 from shared.timezone_handler import TimezoneHandler, apply_timezone_fixes
 from shared.fsm import FSM, AppState
-from strategies.vectorized_obr import run_fast_backtest
+from strategies.vectorized_obr_exact import run_fast_backtest_exact
 
 st.set_page_config(layout="wide", page_title="Backtester Híbrido (IA)", initial_sidebar_state="expanded")
 
@@ -98,13 +98,19 @@ def process_global_backtesting():
             st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
 
     try:
+        # --- INICIO DE LA CORRECCIÓN ---
+        # Se añade un "período de calentamiento" para asegurar que las EMAs se calculen correctamente desde el primer día.
+        warmup_period = datetime.timedelta(days=7)
+        adjusted_download_start = st.session_state.ui_download_start - warmup_period
+        # --- FIN DE LA CORRECCIÓN ---
+
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
             df_full = dm.get_main_data(
                 symbol=st.session_state.ui_symbol, timeframe='1 min', 
                 sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
                 currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth, 
                 what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=st.session_state.ui_download_start,
+                download_start_date=adjusted_download_start, # Se usa la fecha ajustada
                 download_end_date=st.session_state.ui_download_end,
                 use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
             )
@@ -113,8 +119,13 @@ def process_global_backtesting():
         
         df_full = df_full.tz_convert(tz_handler.display_tz)
         all_trades, full_equity_history = [], []
-        unique_dates = sorted(df_full.index.normalize().unique())
+        
+        # Se filtra el rango de fechas para el bucle para que coincida con la selección del usuario (excluyendo el calentamiento)
+        unique_dates = sorted(df_full[df_full.index.date >= st.session_state.ui_download_start].index.normalize().unique())
+        
         progress_bar = st.progress(0, text="Procesando días...")
+
+        current_capital = config.INITIAL_CAPITAL
 
         for i, date in enumerate(unique_dates):
             date_obj = date.date()
@@ -130,49 +141,40 @@ def process_global_backtesting():
             df_day = df_full[df_full.index.date == date_obj]
             if df_day.empty: continue
 
-            orh, orl = np.nan, np.nan
             try:
                 or_start_time = tz_handler.market_open_time
                 or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
                 or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
                 or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
                 if not or_candles.empty:
-                    orh, orl = or_candles['high'].max(), or_candles['low'].min()
-                    levels['ORH'], levels['ORL'] = orh, orl
+                    levels['ORH'], levels['ORL'] = or_candles['high'].max(), or_candles['low'].min()
             except Exception as e:
                 logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
 
-            levels_data = [(k, v) for k, v in levels.items() if pd.notna(v)]
-            if not levels_data: continue
-            
-            level_name_map = {'ORH': 1, 'ORL': 2, 'PDH': 3, 'PDL': 4, 'PMH': 5, 'PML': 6}
-            level_names_numeric = np.array([level_name_map.get(item[0], 0) for item in levels_data], dtype=np.int32)
-            
-            level_prices = np.array([item[1] for item in levels_data], dtype=np.float64)
-            level_dirs = np.array([1 if 'H' in name else -1 for name, _ in levels_data], dtype=np.int8)
-            level_ranges = np.array([config.LEVEL_RANGES.get(name, 0.0) for name, _ in levels_data], dtype=np.float64)
+            lookback_candles = 60
+            previous_day_data = df_full[df_full.index.date < date_obj]
+            df_lookback = previous_day_data.tail(lookback_candles)
+            df_combined_for_day = pd.concat([df_lookback, df_day])
+            day_start_index = len(df_lookback)
 
-            ema_mode_map = {"Desactivado": 0, "Moderado": 1, "Fuerte": 2}
-            ema_filter_mode = ema_mode_map.get(st.session_state.ui_ema_filter, 0)
-
-            trades, equity_hist = run_fast_backtest(
-                df_day['open'].to_numpy(dtype=np.float64), df_day['high'].to_numpy(dtype=np.float64),
-                df_day['low'].to_numpy(dtype=np.float64), df_day['close'].to_numpy(dtype=np.float64),
-                df_day.index.values.astype(np.int64) // 10**9, 
-                df_day.index.hour.to_numpy(dtype=np.int8),
-                df_day.index.minute.to_numpy(dtype=np.int8),
-                level_names_numeric, level_prices, level_dirs,
-                max_retest_candles=15, risk_reward_ratio=2.0,
-                sl_default_lookback=3, sl_reduced_lookback=2,
-                level_ranges=level_ranges, orh_price=orh, orl_price=orl,
-                initial_capital=config.INITIAL_CAPITAL, commission_per_side=config.COMMISSION_PER_TRADE,
+            trades, equity_hist = run_fast_backtest_exact(
+                df_day_with_context=df_combined_for_day,
+                day_start_index=day_start_index,
+                day_levels={k: v for k, v in levels.items() if pd.notna(v)},
+                ema_filter_mode=st.session_state.ui_ema_filter,
+                level_ranges=config.LEVEL_RANGES,
+                initial_capital=current_capital,
+                commission_per_side=config.COMMISSION_PER_TRADE,
                 leverage=float(st.session_state.ui_leverage),
-                ema_filter_mode=ema_filter_mode,
-                ema_periods=np.array([9, 21, 50], dtype=np.float64)
+                stop_after_first_win=True,
+                first_trade_loss_stop=-60.0,
+                max_trades_per_day=2,
             )
             
             if trades.shape[0] > 0: all_trades.append(pd.DataFrame(trades, columns=["entry_time", "exit_time", "direction", "size", "entry_price", "exit_price", "pnl_net", "exit_reason"]))
-            if equity_hist.shape[0] > 0: full_equity_history.append(pd.DataFrame(equity_hist, columns=["time", "equity"]))
+            if equity_hist.shape[0] > 0: 
+                full_equity_history.append(pd.DataFrame(equity_hist, columns=["time", "equity"]))
+                current_capital = equity_hist[-1, 1]
 
         progress_bar.empty()
         st.session_state.session_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
@@ -191,8 +193,12 @@ def render_global_results():
     if trades_df.empty:
         st.warning("La estrategia no generó ninguna operación en el período seleccionado."); return
 
-    trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
-    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
+    for col in ['entry_time', 'exit_time']:
+        trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
+    trades_df.dropna(subset=['entry_time', 'exit_time'], inplace=True)
+
+    trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
+    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
 
     metrics = calculate_performance_metrics(trades_df.to_dict('records'), config.INITIAL_CAPITAL, equity_df.values.tolist())
     cols = st.columns(4)
@@ -307,8 +313,6 @@ def go_to_next_day_visual():
     if next_day: st.session_state.ui_replay_start_date = next_day; st.session_state.app_fsm.transition_to(AppState.READY)
     else: st.toast("No hay más días con datos.")
 
-# --- BLOQUE DE CÓDIGO PROBLEMÁTICO ELIMINADO DE AQUÍ ---
-
 with st.sidebar:
     st.title("Configuración")
     with st.expander("1. Instrumento y Rango", expanded=True):
@@ -332,16 +336,16 @@ with st.sidebar:
 
     if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
         st.selectbox("Timeframe", options=['1 min', '3 mins', '5 mins'], key="ui_timeframe")
-        st.date_input("Día de Replay", key="ui_replay_start_date", min_value=st.session_state.ui_download_start, max_value=st.session_state.ui_download_end)
         
-        # --- INICIO DE LA CORRECCIÓN ---
-        # La validación de la fecha de replay se hace aquí, DESPUÉS de que el widget ha sido creado.
         if st.session_state.ui_replay_start_date < st.session_state.ui_download_start:
             st.session_state.ui_replay_start_date = st.session_state.ui_download_start
         if st.session_state.ui_replay_start_date > st.session_state.ui_download_end:
             st.session_state.ui_replay_start_date = st.session_state.ui_download_end
-        # --- FIN DE LA CORRECCIÓN ---
 
+        st.date_input("Día de Replay", key="ui_replay_start_date", 
+                      min_value=st.session_state.ui_download_start, 
+                      max_value=st.session_state.ui_download_end)
+        
         st.divider()
         st.subheader("Controles de Replay")
         st.number_input("Velocidad Autoplay (s)", 0.1, 5.0, 0.5, 0.1, key="ui_autoplay_speed")
