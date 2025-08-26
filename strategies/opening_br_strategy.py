@@ -34,16 +34,36 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         
         logger.debug("Estrategia OBR (FSM) inicializada con lógica de SL/TP detallada.")
 
-    def reset(self):
-        """ Resetea el estado completo de la estrategia, incluyendo las FSMs y las EMAs. """
+    # --- INICIO DE LA CORRECCIÓN ---
+
+    def reset_for_new_day(self):
+        """ 
+        Reseteo completo para el inicio de un nuevo día de trading.
+        Limpia niveles, FSMs y estado de EMAs.
+        """
         self.level_fsms = {}
         self.last_levels_processed = None
-        # --- INICIO DE LA CORRECCIÓN ---
-        # Se resetea el estado de las EMAs para asegurar que cada día comience limpio.
         self.last_ema_values = {}
         self.last_processed_timestamp = None
-        # --- FIN DE LA CORRECCIÓN ---
-        logger.debug("Estrategia OBR (FSM) reseteada.")
+        logger.debug("Estrategia OBR (FSM) reseteada para un nuevo día.")
+
+    def reset(self):
+        """ 
+        Reseteo parcial después de una operación.
+        Reinicia el estado de las FSMs existentes a IDLE para que puedan
+        buscar nuevas señales si la lógica del backtester lo permite,
+        pero NO borra los niveles ya procesados para el día.
+        """
+        if not self.level_fsms:
+            return
+            
+        for fsm in self.level_fsms.values():
+            fsm.reset()
+        
+        logger.debug(f"FSMs de niveles reseteadas a estado IDLE. {len(self.level_fsms)} FSMs activas.")
+
+    # --- FIN DE LA CORRECCIÓN ---
+
 
     def _initialize_fsms(self, current_day_levels: dict):
         if current_day_levels == self.last_levels_processed:

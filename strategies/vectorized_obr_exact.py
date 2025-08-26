@@ -41,7 +41,10 @@ def run_fast_backtest_exact(
     leverage: float = 5.0,
     # --- Reglas de sesión del motor rápido (se mantienen) ---
     stop_after_first_win: bool = True,
+    # --- INICIO DE LA MODIFICACIÓN ---
+    # El valor ahora es dinámico, calculado a partir de un % del capital
     first_trade_loss_stop: float = -60.0,
+    # --- FIN DE LA MODIFICACIÓN ---
     max_trades_per_day: int = 2,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -67,6 +70,9 @@ def run_fast_backtest_exact(
         sl_lookback=sl_lookback,
         risk_reward_ratio=risk_reward_ratio,
     )
+
+    # Se llama al reseteo completo UNA SOLA VEZ al inicio del día.
+    strat.reset_for_new_day()
 
     # --- Estado de ejecución (idéntico al motor rápido) ---
     equity = float(initial_capital)
@@ -120,10 +126,15 @@ def run_fast_backtest_exact(
 
                 trades_today += 1
                 if stop_after_first_win and pnl_net > 0: stop_trading_for_day = True
+                # --- INICIO DE LA MODIFICACIÓN ---
+                # La lógica sigue siendo la misma, pero el valor de 'first_trade_loss_stop' ahora es dinámico.
                 elif trades_today == 1 and pnl_net <= first_trade_loss_stop: stop_trading_for_day = True
+                # --- FIN DE LA MODIFICACIÓN ---
                 elif trades_today >= max_trades_per_day: stop_trading_for_day = True
 
                 direction, position_size = 0, 0.0
+                
+                # Ahora se llama al reseteo parcial, que no borra la memoria del día.
                 strat.reset()
 
         unrealized = 0.0

@@ -62,6 +62,7 @@ def initialize_session_state():
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
     st.session_state.ui_display_tz = config.DEFAULT_DISPLAY_TZ
+    st.session_state.ui_initial_capital = config.INITIAL_CAPITAL
     st.session_state.ui_leverage = getattr(config, 'DEFAULT_LEVERAGE', 5)
     st.session_state.ui_backtest_mode = "Visual (Paso a Paso)"
     st.session_state.ui_ema_filter = "Desactivado"
@@ -76,8 +77,10 @@ def initialize_session_state():
     st.session_state.ui_what_to_show = config.WHAT_TO_SHOW
     st.session_state.ui_use_cache = config.ENABLE_CACHING
     
+    st.session_state.ui_first_trade_loss_stop_pct = 6.0 # 6% por defecto
+    
     st.session_state.data_manager = DataManager()
-    st.session_state.executor = ExecutionSimulator(initial_capital=config.INITIAL_CAPITAL, leverage=st.session_state.ui_leverage)
+    st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     st.session_state.tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
 
 
@@ -98,11 +101,8 @@ def process_global_backtesting():
             st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
 
     try:
-        # --- INICIO DE LA CORRECCIÓN ---
-        # Se añade un "período de calentamiento" para asegurar que las EMAs se calculen correctamente desde el primer día.
         warmup_period = datetime.timedelta(days=7)
         adjusted_download_start = st.session_state.ui_download_start - warmup_period
-        # --- FIN DE LA CORRECCIÓN ---
 
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
             df_full = dm.get_main_data(
@@ -110,7 +110,7 @@ def process_global_backtesting():
                 sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
                 currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth, 
                 what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=adjusted_download_start, # Se usa la fecha ajustada
+                download_start_date=adjusted_download_start,
                 download_end_date=st.session_state.ui_download_end,
                 use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
             )
@@ -120,12 +120,14 @@ def process_global_backtesting():
         df_full = df_full.tz_convert(tz_handler.display_tz)
         all_trades, full_equity_history = [], []
         
-        # Se filtra el rango de fechas para el bucle para que coincida con la selección del usuario (excluyendo el calentamiento)
         unique_dates = sorted(df_full[df_full.index.date >= st.session_state.ui_download_start].index.normalize().unique())
         
         progress_bar = st.progress(0, text="Procesando días...")
 
-        current_capital = config.INITIAL_CAPITAL
+        current_capital = st.session_state.ui_initial_capital
+        
+        first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
+        logger.info(f"Límite de pérdida para el primer trade establecido en ${first_trade_loss_stop_amount:.2f} ({st.session_state.ui_first_trade_loss_stop_pct}%)")
 
         for i, date in enumerate(unique_dates):
             date_obj = date.date()
@@ -167,7 +169,7 @@ def process_global_backtesting():
                 commission_per_side=config.COMMISSION_PER_TRADE,
                 leverage=float(st.session_state.ui_leverage),
                 stop_after_first_win=True,
-                first_trade_loss_stop=-60.0,
+                first_trade_loss_stop=first_trade_loss_stop_amount,
                 max_trades_per_day=2,
             )
             
@@ -193,6 +195,15 @@ def render_global_results():
     if trades_df.empty:
         st.warning("La estrategia no generó ninguna operación en el período seleccionado."); return
 
+    # --- INICIO DE LA MODIFICACIÓN ---
+    # Mapeo de valores numéricos a strings entendibles
+    direction_map = {1.0: 'LONG', -1.0: 'SHORT'}
+    exit_reason_map = {1.0: 'Take Profit', 2.0: 'Stop Loss', 3.0: 'Timeout'}
+    
+    trades_df['direction'] = trades_df['direction'].map(direction_map).fillna('Desconocido')
+    trades_df['exit_reason'] = trades_df['exit_reason'].map(exit_reason_map).fillna('Desconocido')
+    # --- FIN DE LA MODIFICACIÓN ---
+
     for col in ['entry_time', 'exit_time']:
         trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
     trades_df.dropna(subset=['entry_time', 'exit_time'], inplace=True)
@@ -200,7 +211,7 @@ def render_global_results():
     trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
     trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    metrics = calculate_performance_metrics(trades_df.to_dict('records'), config.INITIAL_CAPITAL, equity_df.values.tolist())
+    metrics = calculate_performance_metrics(st.session_state.session_trades.to_dict('records'), st.session_state.ui_initial_capital, equity_df.values.tolist())
     cols = st.columns(4)
     ganancia_neta_val = metrics['Ganancia Neta Total ($)']
     cols[0].metric("Ganancia Neta Total", f"${ganancia_neta_val:,.2f}", f"{metrics['Ganancia Neta Total (%)']:.2f}%")
@@ -220,7 +231,7 @@ def render_global_results():
 def process_loading_state_visual():
     dm = st.session_state.data_manager
     st.session_state.session_trades, st.session_state.performance_metrics = [], {}
-    st.session_state.executor = ExecutionSimulator(initial_capital=config.INITIAL_CAPITAL, leverage=st.session_state.ui_leverage)
+    st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     with st.spinner("Conectando a IB..."):
         if not dm.connect_ib(): st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
     try:
@@ -302,7 +313,7 @@ def close_position_manually_visual():
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
-                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
+                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
         st.toast("Posición cerrada manualmente.")
 
 
@@ -330,6 +341,14 @@ with st.sidebar:
 
     with st.expander("2. Estrategia y Ejecución", expanded=True):
         st.radio("Modo de Backtest", ["Visual (Paso a Paso)", "Rápido (Global)"], key="ui_backtest_mode")
+        st.number_input("Capital Inicial ($)", min_value=100.0, step=100.0, key="ui_initial_capital")
+        st.number_input(
+            "Pérdida Máxima 1er Trade (%)", 
+            min_value=0.1, max_value=100.0, 
+            key="ui_first_trade_loss_stop_pct", 
+            step=0.5,
+            help="Si la primera operación del día pierde este % del capital, se detiene el trading para ese día."
+        )
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
@@ -369,7 +388,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
 
     idx, current_candle, executor = st.session_state.current_index, df_replay.iloc[st.session_state.current_index], st.session_state.executor
     if executor.leverage != st.session_state.ui_leverage: executor.set_leverage(st.session_state.ui_leverage)
-    if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
+    if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
 
     if not fsm.is_in_state(AppState.FINISHED):
         dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
@@ -397,7 +416,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
-                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, config.INITIAL_CAPITAL, executor.get_equity_history())
+                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
                 if fsm.is_in_state(AppState.REPLAYING): fsm.transition_to(AppState.PAUSED); st.toast("Autoplay pausado.")
             else:
                 st.session_state.last_closed_trade_levels = {}
@@ -406,7 +425,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     with col_metrics:
         st.subheader("Estado de Cuenta")
         equity = executor.get_equity(float(current_candle['close']))
-        st.metric("Equity Actual", f"${equity:,.2f}", f"{(equity - Decimal(str(config.INITIAL_CAPITAL))):,.2f}")
+        st.metric("Equity Actual", f"${equity:,.2f}", f"{(equity - Decimal(str(st.session_state.ui_initial_capital))):,.2f}")
         st.metric("Posición", f"{executor.account_fsm.state}")
         if executor.current_trade:
             trade = executor.current_trade
