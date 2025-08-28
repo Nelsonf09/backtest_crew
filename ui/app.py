@@ -19,8 +19,7 @@ import datetime
 from decimal import Decimal
 import sys
 import pytz
-import calendar
-import plotly.graph_objects as go
+# --- LÍNEA MODIFICADA --- (Se elimina 'calendar' y 'plotly' que ya no se usan directamente aquí)
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -29,6 +28,8 @@ import config
 from agent_core.main import handle_signal_request
 from agent_core.data_manager import DataManager
 from ui.streamlit_chart import prepare_chart_data_and_options
+# --- LÍNEA AÑADIDA ---
+from ui.results_renderer import render_global_results # <-- IMPORTAMOS LA NUEVA FUNCIÓN
 from streamlit_lightweight_charts import renderLightweightCharts
 from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.metrics import calculate_performance_metrics
@@ -57,7 +58,7 @@ def initialize_session_state():
     st.session_state.static_levels = {}
     st.session_state.opening_levels = {}
     st.session_state.last_closed_trade_levels = {}
-    st.session_state.calendar_month_offset = 0 # Para navegación del calendario
+    st.session_state.calendar_month_offset = 0
 
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
     st.session_state.ui_timeframe = config.DEFAULT_TIMEFRAME
@@ -80,7 +81,7 @@ def initialize_session_state():
     st.session_state.ui_what_to_show = config.WHAT_TO_SHOW
     st.session_state.ui_use_cache = config.ENABLE_CACHING
     
-    st.session_state.ui_first_trade_loss_stop_pct = 6.0 # 6% por defecto
+    st.session_state.ui_first_trade_loss_stop_pct = 6.0
     
     st.session_state.data_manager = DataManager()
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
@@ -90,7 +91,7 @@ def initialize_session_state():
 initialize_session_state()
 
 def execute_backtest():
-    st.session_state.calendar_month_offset = 0 # Resetear calendario al ejecutar
+    st.session_state.calendar_month_offset = 0
     if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
         st.session_state.app_fsm.transition_to(AppState.LOADING_DATA)
     else:
@@ -208,208 +209,10 @@ def process_global_backtesting():
     finally:
         dm.disconnect_ib()
 
-def generate_calendar_html(pnl_by_day, year, month, monthly_pnl):
-    cal = calendar.monthcalendar(year, month)
-    month_name = datetime.date(year, month, 1).strftime('%B %Y')
-    
-    pnl_class = "pnl-win" if monthly_pnl >= 0 else "pnl-loss"
-    monthly_pnl_str = f'<span class="{pnl_class}" style="font-size: 18px; margin-left: 20px;">${monthly_pnl:,.2f}</span>'
-
-    html = f"""
-    <style>
-        .calendar {{ font-family: sans-serif; border-collapse: collapse; width: 100%; }}
-        .calendar th {{ background-color: #333; color: white; text-align: center; padding: 10px; font-size: 14px; }}
-        .calendar td {{ border: 1px solid #444; height: 90px; vertical-align: top; padding: 5px; width: 12.5%; }}
-        .calendar .day-number {{ font-size: 12px; color: #aaa; text-align: left; }}
-        .calendar .pnl-win {{ color: #26a69a; font-weight: bold; font-size: 16px; text-align: center; margin-top: 10px; }}
-        .calendar .pnl-loss {{ color: #ef5350; font-weight: bold; font-size: 16px; text-align: center; margin-top: 10px; }}
-        .calendar .trade-count {{ font-size: 11px; color: #888; text-align: center; }}
-        .calendar .empty-day {{ background-color: #2b2b2b; }}
-        .weekly-summary-cell {{ vertical-align: middle !important; text-align: center; }}
-        .week-label {{ font-size: 14px; font-weight: bold; color: #ccc; }}
-        .week-pnl-win {{ font-size: 16px; color: #26a69a; }}
-        .week-pnl-loss {{ font-size: 16px; color: #ef5350; }}
-        .week-trades {{ font-size: 12px; color: #888; }}
-    </style>
-    <h3 style="text-align: center;">{month_name} {monthly_pnl_str}</h3>
-    <table class="calendar">
-        <tr><th>Dom</th><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th style="background-color: #1e1e1e;">Resumen Semanal</th></tr>
-    """
-    
-    for i, week in enumerate(cal):
-        html += "<tr>"
-        week_pnl = 0
-        week_trades = 0
-        for day in week:
-            if day == 0:
-                html += '<td class="empty-day"></td>'
-            else:
-                date = datetime.date(year, month, day)
-                day_data = pnl_by_day.get(date)
-                if day_data:
-                    pnl = day_data['pnl']
-                    count = day_data['count']
-                    week_pnl += pnl
-                    week_trades += count
-                    pnl_class = "pnl-win" if pnl >= 0 else "pnl-loss"
-                    pnl_text = f"${pnl:,.2f}"
-                    count_text = f"{int(count)} trade{'s' if count > 1 else ''}"
-                    html += f'<td><div class="day-number">{day}</div><div class="{pnl_class}">{pnl_text}</div><div class="trade-count">{count_text}</div></td>'
-                else:
-                    html += f'<td><div class="day-number">{day}</div></td>'
-        
-        if week_trades > 0:
-            pnl_class = "week-pnl-win" if week_pnl >= 0 else "week-pnl-loss"
-            html += f'<td class="weekly-summary-cell">'
-            html += f'<div class="week-label">Semana {i+1}</div>'
-            html += f'<div class="{pnl_class}">${week_pnl:,.2f}</div>'
-            html += f'<div class="week-trades">{int(week_trades)} trades</div>'
-            html += '</td>'
-        else:
-            html += '<td class="empty-day"></td>'
-            
-        html += "</tr>"
-    html += "</table>"
-    return html
-
-def render_global_results():
-    st.header("Resultados del Backtest Global")
-    
-    trades_df_raw = st.session_state.session_trades
-    equity_df = st.session_state.global_equity_history
-    
-    if trades_df_raw.empty:
-        st.warning("La estrategia no generó ninguna operación en el período seleccionado.")
-        return
-
-    trades_df = trades_df_raw.copy()
-    for col in ['entry_time', 'exit_time', 'pnl_net']:
-        trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
-    trades_df.dropna(subset=['entry_time', 'exit_time', 'pnl_net'], inplace=True)
-    
-    trades_df['entry_time_dt'] = pd.to_datetime(trades_df['entry_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz)
-
-    metrics = calculate_performance_metrics(trades_df.to_dict('records'), st.session_state.ui_initial_capital, equity_df.values.tolist())
-
-    st.markdown("---")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Ganancia Neta Total", f"${metrics.get('Ganancia Neta Total ($)', 0):,.2f}", f"{metrics.get('Ganancia Neta Total (%)', 0):.2f}%")
-    col2.metric("Trades Totales", metrics.get('Total Trades', 0))
-    col3.metric("Win Rate", f"{metrics.get('Win Rate (%)', 0):.2f}%")
-    col4.metric("Profit Factor", f"{metrics.get('Profit Factor', 'N/A')}")
-    
-    st.markdown("---")
-
-    chart_col1, chart_col2 = st.columns([2, 1])
-    
-    with chart_col1:
-        st.subheader("Curva de Equity")
-        if not equity_df.empty:
-            equity_df_chart = equity_df.copy()
-            equity_df_chart['time'] = pd.to_datetime(equity_df_chart['time'], unit='s', utc=True)
-            equity_df_chart = equity_df_chart.set_index('time')
-            
-            equity_df_chart = equity_df_chart.resample('D').last().ffill()
-            
-            fig = go.Figure()
-            initial_capital = st.session_state.ui_initial_capital
-
-            fig.add_trace(go.Scatter(
-                x=equity_df_chart.index, y=equity_df_chart['equity'],
-                mode='lines', name='Equity', line=dict(color='#5DADE2', width=2)
-            ))
-
-            # --- INICIO DE LA CORRECCIÓN ---
-            # Área de Ganancia (verde)
-            fig.add_trace(go.Scatter(
-                x=equity_df_chart.index,
-                y=np.maximum(equity_df_chart['equity'], initial_capital),
-                fill='tonexty', fillcolor='rgba(44, 160, 44, 0.2)',
-                mode='none', name='Ganancia'
-            ))
-            
-            # Área de Pérdida (rojo)
-            fig.add_trace(go.Scatter(
-                x=equity_df_chart.index,
-                y=np.minimum(equity_df_chart['equity'], initial_capital),
-                fill='tonexty', fillcolor='rgba(239, 83, 80, 0.2)',
-                mode='none', name='Pérdida'
-            ))
-            # --- FIN DE LA CORRECCIÓN ---
-            
-            fig.add_shape(type='line',
-                x0=equity_df_chart.index.min(), y0=initial_capital,
-                x1=equity_df_chart.index.max(), y1=initial_capital,
-                line=dict(color='white', width=1, dash='dash')
-            )
-
-            fig.update_layout(
-                template="plotly_dark",
-                showlegend=False,
-                yaxis_title="Capital ($)",
-                xaxis_title="Fecha"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-    with chart_col2:
-        st.subheader("Métricas Adicionales")
-        avg_win = metrics.get('Ganancia Promedio ($)', 0)
-        avg_loss = metrics.get('Pérdida Promedio ($)', 0)
-        
-        st.metric("Trade Ganador Promedio", f"${avg_win:,.2f}")
-        st.metric("Trade Perdedor Promedio", f"${avg_loss:,.2f}")
-        st.metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.2f}%")
-
-    st.markdown("---")
-    
-    st.subheader("Rendimiento Detallado")
-    tab1, tab2 = st.tabs(["Calendario", "Rendimiento Mensual"])
-
-    with tab2:
-        monthly_pnl_chart = trades_df.set_index('entry_time_dt')['pnl_net'].resample('ME').sum()
-        monthly_pnl_chart.index = monthly_pnl_chart.index.strftime('%Y-%b')
-        st.bar_chart(monthly_pnl_chart)
-
-    with tab1:
-        daily_pnl_agg = trades_df.set_index('entry_time_dt').groupby(pd.Grouper(freq='D'))['pnl_net'].agg(['sum', 'count'])
-        daily_pnl_agg.columns = ['pnl', 'count']
-        daily_pnl_agg = daily_pnl_agg[daily_pnl_agg['pnl'] != 0]
-        daily_pnl_dict = {d.date(): {'pnl': r['pnl'], 'count': r['count']} for d, r in daily_pnl_agg.iterrows()}
-
-        if daily_pnl_dict:
-            start_date = st.session_state.ui_download_start
-            
-            nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-            if nav_col1.button("◀ Mes Anterior"):
-                st.session_state.calendar_month_offset -= 1
-            if nav_col3.button("Mes Siguiente ▶"):
-                st.session_state.calendar_month_offset += 1
-            
-            current_month_start = (start_date.replace(day=1) + pd.DateOffset(months=st.session_state.calendar_month_offset))
-            year, month = current_month_start.year, current_month_start.month
-            
-            monthly_pnl_value = daily_pnl_agg[
-                (daily_pnl_agg.index.year == year) & (daily_pnl_agg.index.month == month)
-            ]['pnl'].sum()
-
-            calendar_html = generate_calendar_html(daily_pnl_dict, year, month, monthly_pnl_value)
-            st.markdown(calendar_html, unsafe_allow_html=True)
-        else:
-            st.text("No hay datos para mostrar en el calendario.")
-
-    st.markdown("---")
-    st.subheader("Historial de Operaciones")
-    trades_display = trades_df.copy()
-    direction_map = {1.0: 'LONG', -1.0: 'SHORT'}
-    exit_reason_map = {1.0: 'Take Profit', 2.0: 'Stop Loss', 3.0: 'Timeout'}
-    
-    trades_display['direction'] = trades_df_raw['direction'].map(direction_map).fillna('Desconocido')
-    trades_display['exit_reason'] = trades_df_raw['exit_reason'].map(exit_reason_map).fillna('Desconocido')
-    trades_display['entry_time_str'] = trades_display['entry_time_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    trades_display['exit_time_str'] = pd.to_datetime(trades_display['exit_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
-    
-    st.dataframe(trades_display[['entry_time_str', 'exit_time_str', 'direction', 'size', 'entry_price', 'exit_price', 'pnl_net', 'exit_reason']])
+# --- BLOQUE DE CÓDIGO ELIMINADO ---
+# Se eliminan las funciones `generate_calendar_html` y `render_global_results` de este archivo.
+# Su funcionalidad ahora está en `ui/results_renderer.py`.
+# --- FIN DEL BLOQUE ELIMINADO ---
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager
@@ -561,7 +364,7 @@ if fsm.is_in_state(AppState.CONFIGURING): st.info("Ajusta los parámetros y ejec
 elif fsm.is_in_state(AppState.LOADING_DATA): process_loading_state_visual(); st.rerun()
 elif fsm.is_in_state(AppState.READY): process_and_prepare_daily_data_visual(); st.rerun()
 elif fsm.is_in_state(AppState.GLOBAL_BACKTESTING): process_global_backtesting(); st.rerun()
-elif fsm.is_in_state(AppState.SHOWING_RESULTS): render_global_results()
+elif fsm.is_in_state(AppState.SHOWING_RESULTS): render_global_results() # <-- LLAMADA A LA NUEVA FUNCIÓN
 elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     df_replay = st.session_state.df_replay_display
     if df_replay.empty:
