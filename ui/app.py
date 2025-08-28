@@ -19,6 +19,8 @@ import datetime
 from decimal import Decimal
 import sys
 import pytz
+import calendar
+import plotly.graph_objects as go
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -55,6 +57,7 @@ def initialize_session_state():
     st.session_state.static_levels = {}
     st.session_state.opening_levels = {}
     st.session_state.last_closed_trade_levels = {}
+    st.session_state.calendar_month_offset = 0 # Para navegación del calendario
 
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
     st.session_state.ui_timeframe = config.DEFAULT_TIMEFRAME
@@ -87,6 +90,7 @@ def initialize_session_state():
 initialize_session_state()
 
 def execute_backtest():
+    st.session_state.calendar_month_offset = 0 # Resetear calendario al ejecutar
     if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
         st.session_state.app_fsm.transition_to(AppState.LOADING_DATA)
     else:
@@ -129,6 +133,8 @@ def process_global_backtesting():
         first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
         logger.info(f"Límite de pérdida para el primer trade establecido en ${first_trade_loss_stop_amount:.2f} ({st.session_state.ui_first_trade_loss_stop_pct}%)")
 
+        last_day_closing_equity = st.session_state.ui_initial_capital
+
         for i, date in enumerate(unique_dates):
             date_obj = date.date()
             progress_bar.progress((i + 1) / len(unique_dates), text=f"Procesando {date_obj.strftime('%Y-%m-%d')}...")
@@ -159,7 +165,7 @@ def process_global_backtesting():
             df_combined_for_day = pd.concat([df_lookback, df_day])
             day_start_index = len(df_lookback)
 
-            trades, equity_hist = run_fast_backtest_exact(
+            trades, equity_hist_array = run_fast_backtest_exact(
                 df_day_with_context=df_combined_for_day,
                 day_start_index=day_start_index,
                 day_levels={k: v for k, v in levels.items() if pd.notna(v)},
@@ -174,9 +180,24 @@ def process_global_backtesting():
             )
             
             if trades.shape[0] > 0: all_trades.append(pd.DataFrame(trades, columns=["entry_time", "exit_time", "direction", "size", "entry_price", "exit_price", "pnl_net", "exit_reason"]))
-            if equity_hist.shape[0] > 0: 
-                full_equity_history.append(pd.DataFrame(equity_hist, columns=["time", "equity"]))
-                current_capital = equity_hist[-1, 1]
+            
+            if equity_hist_array.shape[0] > 0:
+                equity_hist_df = pd.DataFrame(equity_hist_array, columns=["time", "equity"])
+                
+                daily_starting_equity = equity_hist_df['equity'].iloc[0]
+                equity_adjustment = last_day_closing_equity - daily_starting_equity
+                
+                equity_hist_df['equity'] += equity_adjustment
+                
+                full_equity_history.append(equity_hist_df)
+                
+                current_capital = equity_hist_df['equity'].iloc[-1]
+                last_day_closing_equity = current_capital
+            else:
+                if not df_day.empty:
+                    end_of_day_ts = df_day.index[-1].timestamp()
+                    no_trade_equity_df = pd.DataFrame([{'time': end_of_day_ts, 'equity': last_day_closing_equity}])
+                    full_equity_history.append(no_trade_equity_df)
 
         progress_bar.empty()
         st.session_state.session_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
@@ -187,46 +208,208 @@ def process_global_backtesting():
     finally:
         dm.disconnect_ib()
 
+def generate_calendar_html(pnl_by_day, year, month, monthly_pnl):
+    cal = calendar.monthcalendar(year, month)
+    month_name = datetime.date(year, month, 1).strftime('%B %Y')
+    
+    pnl_class = "pnl-win" if monthly_pnl >= 0 else "pnl-loss"
+    monthly_pnl_str = f'<span class="{pnl_class}" style="font-size: 18px; margin-left: 20px;">${monthly_pnl:,.2f}</span>'
+
+    html = f"""
+    <style>
+        .calendar {{ font-family: sans-serif; border-collapse: collapse; width: 100%; }}
+        .calendar th {{ background-color: #333; color: white; text-align: center; padding: 10px; font-size: 14px; }}
+        .calendar td {{ border: 1px solid #444; height: 90px; vertical-align: top; padding: 5px; width: 12.5%; }}
+        .calendar .day-number {{ font-size: 12px; color: #aaa; text-align: left; }}
+        .calendar .pnl-win {{ color: #26a69a; font-weight: bold; font-size: 16px; text-align: center; margin-top: 10px; }}
+        .calendar .pnl-loss {{ color: #ef5350; font-weight: bold; font-size: 16px; text-align: center; margin-top: 10px; }}
+        .calendar .trade-count {{ font-size: 11px; color: #888; text-align: center; }}
+        .calendar .empty-day {{ background-color: #2b2b2b; }}
+        .weekly-summary-cell {{ vertical-align: middle !important; text-align: center; }}
+        .week-label {{ font-size: 14px; font-weight: bold; color: #ccc; }}
+        .week-pnl-win {{ font-size: 16px; color: #26a69a; }}
+        .week-pnl-loss {{ font-size: 16px; color: #ef5350; }}
+        .week-trades {{ font-size: 12px; color: #888; }}
+    </style>
+    <h3 style="text-align: center;">{month_name} {monthly_pnl_str}</h3>
+    <table class="calendar">
+        <tr><th>Dom</th><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th style="background-color: #1e1e1e;">Resumen Semanal</th></tr>
+    """
+    
+    for i, week in enumerate(cal):
+        html += "<tr>"
+        week_pnl = 0
+        week_trades = 0
+        for day in week:
+            if day == 0:
+                html += '<td class="empty-day"></td>'
+            else:
+                date = datetime.date(year, month, day)
+                day_data = pnl_by_day.get(date)
+                if day_data:
+                    pnl = day_data['pnl']
+                    count = day_data['count']
+                    week_pnl += pnl
+                    week_trades += count
+                    pnl_class = "pnl-win" if pnl >= 0 else "pnl-loss"
+                    pnl_text = f"${pnl:,.2f}"
+                    count_text = f"{int(count)} trade{'s' if count > 1 else ''}"
+                    html += f'<td><div class="day-number">{day}</div><div class="{pnl_class}">{pnl_text}</div><div class="trade-count">{count_text}</div></td>'
+                else:
+                    html += f'<td><div class="day-number">{day}</div></td>'
+        
+        if week_trades > 0:
+            pnl_class = "week-pnl-win" if week_pnl >= 0 else "week-pnl-loss"
+            html += f'<td class="weekly-summary-cell">'
+            html += f'<div class="week-label">Semana {i+1}</div>'
+            html += f'<div class="{pnl_class}">${week_pnl:,.2f}</div>'
+            html += f'<div class="week-trades">{int(week_trades)} trades</div>'
+            html += '</td>'
+        else:
+            html += '<td class="empty-day"></td>'
+            
+        html += "</tr>"
+    html += "</table>"
+    return html
+
 def render_global_results():
     st.header("Resultados del Backtest Global")
-    trades_df = st.session_state.session_trades
+    
+    trades_df_raw = st.session_state.session_trades
     equity_df = st.session_state.global_equity_history
     
-    if trades_df.empty:
-        st.warning("La estrategia no generó ninguna operación en el período seleccionado."); return
+    if trades_df_raw.empty:
+        st.warning("La estrategia no generó ninguna operación en el período seleccionado.")
+        return
 
-    # --- INICIO DE LA MODIFICACIÓN ---
-    # Mapeo de valores numéricos a strings entendibles
+    trades_df = trades_df_raw.copy()
+    for col in ['entry_time', 'exit_time', 'pnl_net']:
+        trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
+    trades_df.dropna(subset=['entry_time', 'exit_time', 'pnl_net'], inplace=True)
+    
+    trades_df['entry_time_dt'] = pd.to_datetime(trades_df['entry_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz)
+
+    metrics = calculate_performance_metrics(trades_df.to_dict('records'), st.session_state.ui_initial_capital, equity_df.values.tolist())
+
+    st.markdown("---")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Ganancia Neta Total", f"${metrics.get('Ganancia Neta Total ($)', 0):,.2f}", f"{metrics.get('Ganancia Neta Total (%)', 0):.2f}%")
+    col2.metric("Trades Totales", metrics.get('Total Trades', 0))
+    col3.metric("Win Rate", f"{metrics.get('Win Rate (%)', 0):.2f}%")
+    col4.metric("Profit Factor", f"{metrics.get('Profit Factor', 'N/A')}")
+    
+    st.markdown("---")
+
+    chart_col1, chart_col2 = st.columns([2, 1])
+    
+    with chart_col1:
+        st.subheader("Curva de Equity")
+        if not equity_df.empty:
+            equity_df_chart = equity_df.copy()
+            equity_df_chart['time'] = pd.to_datetime(equity_df_chart['time'], unit='s', utc=True)
+            equity_df_chart = equity_df_chart.set_index('time')
+            
+            equity_df_chart = equity_df_chart.resample('D').last().ffill()
+            
+            fig = go.Figure()
+            initial_capital = st.session_state.ui_initial_capital
+
+            fig.add_trace(go.Scatter(
+                x=equity_df_chart.index, y=equity_df_chart['equity'],
+                mode='lines', name='Equity', line=dict(color='#5DADE2', width=2)
+            ))
+
+            # --- INICIO DE LA CORRECCIÓN ---
+            # Área de Ganancia (verde)
+            fig.add_trace(go.Scatter(
+                x=equity_df_chart.index,
+                y=np.maximum(equity_df_chart['equity'], initial_capital),
+                fill='tonexty', fillcolor='rgba(44, 160, 44, 0.2)',
+                mode='none', name='Ganancia'
+            ))
+            
+            # Área de Pérdida (rojo)
+            fig.add_trace(go.Scatter(
+                x=equity_df_chart.index,
+                y=np.minimum(equity_df_chart['equity'], initial_capital),
+                fill='tonexty', fillcolor='rgba(239, 83, 80, 0.2)',
+                mode='none', name='Pérdida'
+            ))
+            # --- FIN DE LA CORRECCIÓN ---
+            
+            fig.add_shape(type='line',
+                x0=equity_df_chart.index.min(), y0=initial_capital,
+                x1=equity_df_chart.index.max(), y1=initial_capital,
+                line=dict(color='white', width=1, dash='dash')
+            )
+
+            fig.update_layout(
+                template="plotly_dark",
+                showlegend=False,
+                yaxis_title="Capital ($)",
+                xaxis_title="Fecha"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with chart_col2:
+        st.subheader("Métricas Adicionales")
+        avg_win = metrics.get('Ganancia Promedio ($)', 0)
+        avg_loss = metrics.get('Pérdida Promedio ($)', 0)
+        
+        st.metric("Trade Ganador Promedio", f"${avg_win:,.2f}")
+        st.metric("Trade Perdedor Promedio", f"${avg_loss:,.2f}")
+        st.metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.2f}%")
+
+    st.markdown("---")
+    
+    st.subheader("Rendimiento Detallado")
+    tab1, tab2 = st.tabs(["Calendario", "Rendimiento Mensual"])
+
+    with tab2:
+        monthly_pnl_chart = trades_df.set_index('entry_time_dt')['pnl_net'].resample('ME').sum()
+        monthly_pnl_chart.index = monthly_pnl_chart.index.strftime('%Y-%b')
+        st.bar_chart(monthly_pnl_chart)
+
+    with tab1:
+        daily_pnl_agg = trades_df.set_index('entry_time_dt').groupby(pd.Grouper(freq='D'))['pnl_net'].agg(['sum', 'count'])
+        daily_pnl_agg.columns = ['pnl', 'count']
+        daily_pnl_agg = daily_pnl_agg[daily_pnl_agg['pnl'] != 0]
+        daily_pnl_dict = {d.date(): {'pnl': r['pnl'], 'count': r['count']} for d, r in daily_pnl_agg.iterrows()}
+
+        if daily_pnl_dict:
+            start_date = st.session_state.ui_download_start
+            
+            nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+            if nav_col1.button("◀ Mes Anterior"):
+                st.session_state.calendar_month_offset -= 1
+            if nav_col3.button("Mes Siguiente ▶"):
+                st.session_state.calendar_month_offset += 1
+            
+            current_month_start = (start_date.replace(day=1) + pd.DateOffset(months=st.session_state.calendar_month_offset))
+            year, month = current_month_start.year, current_month_start.month
+            
+            monthly_pnl_value = daily_pnl_agg[
+                (daily_pnl_agg.index.year == year) & (daily_pnl_agg.index.month == month)
+            ]['pnl'].sum()
+
+            calendar_html = generate_calendar_html(daily_pnl_dict, year, month, monthly_pnl_value)
+            st.markdown(calendar_html, unsafe_allow_html=True)
+        else:
+            st.text("No hay datos para mostrar en el calendario.")
+
+    st.markdown("---")
+    st.subheader("Historial de Operaciones")
+    trades_display = trades_df.copy()
     direction_map = {1.0: 'LONG', -1.0: 'SHORT'}
     exit_reason_map = {1.0: 'Take Profit', 2.0: 'Stop Loss', 3.0: 'Timeout'}
     
-    trades_df['direction'] = trades_df['direction'].map(direction_map).fillna('Desconocido')
-    trades_df['exit_reason'] = trades_df['exit_reason'].map(exit_reason_map).fillna('Desconocido')
-    # --- FIN DE LA MODIFICACIÓN ---
-
-    for col in ['entry_time', 'exit_time']:
-        trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
-    trades_df.dropna(subset=['entry_time', 'exit_time'], inplace=True)
-
-    trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
-    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'], unit='s').dt.tz_localize('UTC').dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    metrics = calculate_performance_metrics(st.session_state.session_trades.to_dict('records'), st.session_state.ui_initial_capital, equity_df.values.tolist())
-    cols = st.columns(4)
-    ganancia_neta_val = metrics['Ganancia Neta Total ($)']
-    cols[0].metric("Ganancia Neta Total", f"${ganancia_neta_val:,.2f}", f"{metrics['Ganancia Neta Total (%)']:.2f}%")
-    cols[1].metric("Trades Totales", metrics['Total Trades'])
-    cols[2].metric("Win Rate", f"{metrics['Win Rate (%)']:.2f}%")
-    cols[3].metric("Profit Factor", f"{metrics['Profit Factor']}")
+    trades_display['direction'] = trades_df_raw['direction'].map(direction_map).fillna('Desconocido')
+    trades_display['exit_reason'] = trades_df_raw['exit_reason'].map(exit_reason_map).fillna('Desconocido')
+    trades_display['entry_time_str'] = trades_display['entry_time_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    trades_display['exit_time_str'] = pd.to_datetime(trades_display['exit_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    st.subheader("Curva de Equity")
-    if not equity_df.empty:
-        equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
-        equity_df = equity_df.set_index('time')
-        st.line_chart(equity_df['equity'])
-    
-    st.subheader("Historial de Operaciones")
-    st.dataframe(trades_df)
+    st.dataframe(trades_display[['entry_time_str', 'exit_time_str', 'direction', 'size', 'entry_price', 'exit_price', 'pnl_net', 'exit_reason']])
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager

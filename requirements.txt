@@ -7,6 +7,7 @@ pytz
 ib_insync
 python-dotenv
 numba  # <-- AÑADIDO PARA EL MOTOR RÁPIDO
+plotly # <-- AÑADIDO PARA LOS GRÁFICOS DEL DASHBOARD
 
 --- Librerías de IA Principales ---
 Dejamos que crewai gestione sus propias dependencias de langchain
