@@ -1,7 +1,6 @@
 # ui/app.py
 """
 Aplicación Streamlit para el Backtesting Player Visual.
-Versión COMPLETA con MODO DUAL: Replay visual paso a paso y backtest global rápido con Numba.
 """
 import nest_asyncio
 nest_asyncio.apply()
@@ -26,9 +25,10 @@ sys.path.append(str(project_root))
 import config
 from agent_core.main import handle_signal_request
 from agent_core.data_manager import DataManager
+from agent_core.technical_analyzer import add_technical_indicators
 from ui.streamlit_chart import prepare_chart_data_and_options
 from ui.results_renderer import render_global_results
-from ui.comparison_renderer import render_comparison_dashboard # <-- NUEVA IMPORTACIÓN
+from ui.comparison_renderer import render_comparison_dashboard
 from streamlit_lightweight_charts import renderLightweightCharts
 from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.metrics import calculate_performance_metrics
@@ -50,7 +50,7 @@ def initialize_session_state():
     st.session_state.session_trades = []
     st.session_state.performance_metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
-    st.session_state.comparison_results = {} # <-- Nuevo estado para guardar resultados
+    st.session_state.comparison_results = {}
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
     st.session_state.current_index = 0
@@ -61,7 +61,8 @@ def initialize_session_state():
     st.session_state.calendar_month_offset = 0
 
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
-    st.session_state.ui_timeframe = config.DEFAULT_TIMEFRAME
+    st.session_state.ui_timeframe = '1 min'
+    st.session_state.ui_filter_timeframe = '1 min'
     st.session_state.ui_download_start = _start
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
@@ -87,6 +88,7 @@ def initialize_session_state():
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     st.session_state.tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
 
+
 initialize_session_state()
 
 def execute_backtest():
@@ -96,10 +98,9 @@ def execute_backtest():
     else:
         st.session_state.app_fsm.transition_to(AppState.GLOBAL_BACKTESTING)
 
-# --- FUNCIÓN MODIFICADA Y EXTRAÍDA ---
-def run_single_backtest_iteration(df_full, tz_handler, ema_filter_mode):
+def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
     all_trades, full_equity_history = [], []
-    unique_dates = sorted(df_full[df_full.index.date >= st.session_state.ui_download_start].index.normalize().unique())
+    unique_dates = df_enriched[df_enriched.index.date >= st.session_state.ui_download_start].index.normalize().unique()
     
     current_capital = st.session_state.ui_initial_capital
     first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
@@ -115,7 +116,7 @@ def run_single_backtest_iteration(df_full, tz_handler, ema_filter_mode):
             primary_exchange=st.session_state.ui_primary_exchange
         )
         levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
-        df_day = df_full[df_full.index.date == date_obj]
+        df_day = df_enriched[df_enriched.index.date == date_obj]
         if df_day.empty: continue
 
         try:
@@ -129,7 +130,7 @@ def run_single_backtest_iteration(df_full, tz_handler, ema_filter_mode):
             logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
 
         lookback_candles = 60
-        previous_day_data = df_full[df_full.index.date < date_obj]
+        previous_day_data = df_enriched[df_enriched.index.date < date_obj]
         df_lookback = previous_day_data.tail(lookback_candles)
         df_combined_for_day = pd.concat([df_lookback, df_day])
         day_start_index = len(df_lookback)
@@ -177,51 +178,55 @@ def process_global_backtesting():
             st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
 
     try:
-        warmup_period = datetime.timedelta(days=7)
+        warmup_period = datetime.timedelta(days=30)
         adjusted_download_start = st.session_state.ui_download_start - warmup_period
+        exec_tf = '1 min'
+        filter_tf = st.session_state.ui_filter_timeframe
 
-        with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
-            df_full = dm.get_main_data(
-                symbol=st.session_state.ui_symbol, timeframe='1 min', 
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-                currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth, 
-                what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=adjusted_download_start,
-                download_end_date=st.session_state.ui_download_end,
-                use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
-            )
-        if df_full.empty:
-            st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
+        with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
+            common_params = {
+                "symbol": st.session_state.ui_symbol, "sec_type": st.session_state.ui_sec_type,
+                "exchange": st.session_state.ui_exchange, "currency": st.session_state.ui_currency,
+                "rth": st.session_state.ui_use_rth, "what_to_show": st.session_state.ui_what_to_show,
+                "download_start_date": adjusted_download_start, "download_end_date": st.session_state.ui_download_end,
+                "use_cache": st.session_state.ui_use_cache, "primary_exchange": st.session_state.ui_primary_exchange
+            }
+            df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
+            
+            df_filter_raw = pd.DataFrame()
+            if filter_tf != exec_tf:
+                df_filter_raw = dm.get_main_data(timeframe=filter_tf, **common_params)
+
+        if df_exec_raw.empty:
+            st.warning("No se obtuvieron datos para el timeframe de ejecución."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
         
-        df_full = df_full.tz_convert(tz_handler.display_tz)
+        with st.spinner("Calculando indicadores técnicos..."):
+            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw if not df_filter_raw.empty else None)
+        
+        df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
 
-        # --- LÓGICA DE COMPARACIÓN ---
         if st.session_state.ui_ema_filter == "Comparar Filtros":
             st.session_state.comparison_results = {}
             filter_modes = ["Desactivado", "Moderado", "Fuerte"]
             progress_bar = st.progress(0, text="Iniciando comparación...")
             for i, mode in enumerate(filter_modes):
                 progress_bar.progress((i + 1) / len(filter_modes), text=f"Ejecutando backtest para filtro: {mode}")
-                trades, equity = run_single_backtest_iteration(df_full.copy(), tz_handler, mode)
+                trades, equity = run_single_backtest_iteration(df_enriched_local.copy(), tz_handler, mode)
                 st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity}
             
             progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
         
-        # --- LÓGICA DE BACKTEST ÚNICO ---
         else:
-            progress_bar = st.progress(0, text="Procesando días...")
             st.session_state.session_trades, st.session_state.global_equity_history = run_single_backtest_iteration(
-                df_full.copy(), tz_handler, st.session_state.ui_ema_filter
+                df_enriched_local.copy(), tz_handler, st.session_state.ui_ema_filter
             )
-            progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_RESULTS)
 
     except Exception as e:
-        st.error(f"Error en backtest global: {e}"); st.session_state.app_fsm.transition_to(AppState.ERROR)
+        st.error(f"Error en backtest global: {e}", exc_info=True); st.session_state.app_fsm.transition_to(AppState.ERROR)
     finally:
-        dm.disconnect_ib()
-
+        dm.disconnect_ib() # Se desconecta después de la ejecución
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager
@@ -230,7 +235,7 @@ def process_loading_state_visual():
     with st.spinner("Conectando a IB..."):
         if not dm.connect_ib(): st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
     try:
-        lookback_days = datetime.timedelta(days=7)
+        lookback_days = datetime.timedelta(days=30)
         adjusted_download_start = st.session_state.ui_download_start - lookback_days
         
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
@@ -274,9 +279,15 @@ def process_and_prepare_daily_data_visual():
     
     df_context_utc = st.session_state.all_data_utc[st.session_state.all_data_utc.index < start_utc]
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
+
+    df_full_day_utc = pd.concat([df_context_utc, df_replay_utc])
+    df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50])
     
-    st.session_state.df_context_display = apply_timezone_fixes(st.session_state, df_context_utc, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
-    st.session_state.df_replay_display = apply_timezone_fixes(st.session_state, df_replay_utc, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
+    df_context_enriched = df_enriched.loc[df_context_utc.index]
+    df_replay_enriched = df_enriched.loc[df_replay_utc.index]
+    
+    st.session_state.df_context_display = apply_timezone_fixes(st.session_state, df_context_enriched, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
+    st.session_state.df_replay_display = apply_timezone_fixes(st.session_state, df_replay_enriched, st.session_state.ui_display_tz, st.session_state.ui_use_rth)
     
     if not st.session_state.df_replay_display.empty:
         try:
@@ -342,13 +353,18 @@ with st.sidebar:
             step=0.5,
             help="Si la primera operación del día pierde este % del capital, se detiene el trading para ese día."
         )
-        # --- OPCIONES DEL FILTRO MODIFICADAS ---
+        st.selectbox(
+            "Timeframe del Filtro EMA", 
+            options=['1 min', '3 mins', '5 mins', '15 mins', '30 mins', '1 hour'], 
+            key="ui_filter_timeframe",
+            help="Timeframe para calcular las EMAs. '1 min' usa el mismo timeframe que la ejecución."
+        )
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
 
     if st.session_state.ui_backtest_mode == "Visual (Paso a Paso)":
-        st.selectbox("Timeframe", options=['1 min', '3 mins', '5 mins'], key="ui_timeframe")
+        st.selectbox("Timeframe (Visual)", options=['1 min', '3 mins', '5 mins'], key="ui_timeframe")
         
         if st.session_state.ui_replay_start_date < st.session_state.ui_download_start:
             st.session_state.ui_replay_start_date = st.session_state.ui_download_start
@@ -373,7 +389,7 @@ elif fsm.is_in_state(AppState.LOADING_DATA): process_loading_state_visual(); st.
 elif fsm.is_in_state(AppState.READY): process_and_prepare_daily_data_visual(); st.rerun()
 elif fsm.is_in_state(AppState.GLOBAL_BACKTESTING): process_global_backtesting(); st.rerun()
 elif fsm.is_in_state(AppState.SHOWING_RESULTS): render_global_results()
-elif fsm.is_in_state(AppState.SHOWING_COMPARISON): render_comparison_dashboard() # <-- LLAMADA AL NUEVO DASHBOARD
+elif fsm.is_in_state(AppState.SHOWING_COMPARISON): render_comparison_dashboard()
 elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     df_replay = st.session_state.df_replay_display
     if df_replay.empty:
@@ -389,14 +405,11 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
         df_hist_context = pd.concat(dfs_to_concat_hist) if dfs_to_concat_hist else pd.DataFrame()
 
-        historical_data_utc = df_hist_context.tz_convert(pytz.utc)
-
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
         
-        # En modo visual, no se puede comparar, así que usamos el valor de la UI o 'Desactivado' por defecto
         ema_filter = st.session_state.ui_ema_filter if st.session_state.ui_ema_filter != "Comparar Filtros" else "Desactivado"
         signal = handle_signal_request(
-            historical_data=historical_data_utc, 
+            historical_data=df_hist_context, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
             ema_filter_mode=ema_filter,
             daily_candle_index=idx
@@ -500,3 +513,4 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         st.dataframe(trades_df_display)
     else: st.text("No hay operaciones cerradas en esta sesión.")
 elif fsm.is_in_state(AppState.ERROR): st.error("Ha ocurrido un error. Revisa la configuración y los logs.")
+
