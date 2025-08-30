@@ -19,7 +19,6 @@ import datetime
 from decimal import Decimal
 import sys
 import pytz
-# --- LÍNEA MODIFICADA --- (Se elimina 'calendar' y 'plotly' que ya no se usan directamente aquí)
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -28,8 +27,8 @@ import config
 from agent_core.main import handle_signal_request
 from agent_core.data_manager import DataManager
 from ui.streamlit_chart import prepare_chart_data_and_options
-# --- LÍNEA AÑADIDA ---
-from ui.results_renderer import render_global_results # <-- IMPORTAMOS LA NUEVA FUNCIÓN
+from ui.results_renderer import render_global_results
+from ui.comparison_renderer import render_comparison_dashboard # <-- NUEVA IMPORTACIÓN
 from streamlit_lightweight_charts import renderLightweightCharts
 from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.metrics import calculate_performance_metrics
@@ -51,6 +50,7 @@ def initialize_session_state():
     st.session_state.session_trades = []
     st.session_state.performance_metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
+    st.session_state.comparison_results = {} # <-- Nuevo estado para guardar resultados
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
     st.session_state.current_index = 0
@@ -87,7 +87,6 @@ def initialize_session_state():
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     st.session_state.tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
 
-
 initialize_session_state()
 
 def execute_backtest():
@@ -96,6 +95,78 @@ def execute_backtest():
         st.session_state.app_fsm.transition_to(AppState.LOADING_DATA)
     else:
         st.session_state.app_fsm.transition_to(AppState.GLOBAL_BACKTESTING)
+
+# --- FUNCIÓN MODIFICADA Y EXTRAÍDA ---
+def run_single_backtest_iteration(df_full, tz_handler, ema_filter_mode):
+    all_trades, full_equity_history = [], []
+    unique_dates = sorted(df_full[df_full.index.date >= st.session_state.ui_download_start].index.normalize().unique())
+    
+    current_capital = st.session_state.ui_initial_capital
+    first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
+    last_day_closing_equity = st.session_state.ui_initial_capital
+
+    dm = st.session_state.data_manager
+    for date in unique_dates:
+        date_obj = date.date()
+        df_prev, df_pm = dm.get_levels_data(
+            target_date=date_obj, symbol=st.session_state.ui_symbol, 
+            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
+            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
+            primary_exchange=st.session_state.ui_primary_exchange
+        )
+        levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+        df_day = df_full[df_full.index.date == date_obj]
+        if df_day.empty: continue
+
+        try:
+            or_start_time = tz_handler.market_open_time
+            or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
+            or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
+            or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
+            if not or_candles.empty:
+                levels['ORH'], levels['ORL'] = or_candles['high'].max(), or_candles['low'].min()
+        except Exception as e:
+            logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
+
+        lookback_candles = 60
+        previous_day_data = df_full[df_full.index.date < date_obj]
+        df_lookback = previous_day_data.tail(lookback_candles)
+        df_combined_for_day = pd.concat([df_lookback, df_day])
+        day_start_index = len(df_lookback)
+
+        trades, equity_hist_array = run_fast_backtest_exact(
+            df_day_with_context=df_combined_for_day,
+            day_start_index=day_start_index,
+            day_levels={k: v for k, v in levels.items() if pd.notna(v)},
+            ema_filter_mode=ema_filter_mode,
+            level_ranges=config.LEVEL_RANGES,
+            initial_capital=current_capital,
+            commission_per_side=config.COMMISSION_PER_TRADE,
+            leverage=float(st.session_state.ui_leverage),
+            stop_after_first_win=True,
+            first_trade_loss_stop=first_trade_loss_stop_amount,
+            max_trades_per_day=2,
+        )
+        
+        if trades.shape[0] > 0: all_trades.append(pd.DataFrame(trades, columns=["entry_time", "exit_time", "direction", "size", "entry_price", "exit_price", "pnl_net", "exit_reason"]))
+        
+        if equity_hist_array.shape[0] > 0:
+            equity_hist_df = pd.DataFrame(equity_hist_array, columns=["time", "equity"])
+            daily_starting_equity = equity_hist_df['equity'].iloc[0]
+            equity_adjustment = last_day_closing_equity - daily_starting_equity
+            equity_hist_df['equity'] += equity_adjustment
+            full_equity_history.append(equity_hist_df)
+            current_capital = equity_hist_df['equity'].iloc[-1]
+            last_day_closing_equity = current_capital
+        elif not df_day.empty:
+            end_of_day_ts = df_day.index[-1].timestamp()
+            no_trade_equity_df = pd.DataFrame([{'time': end_of_day_ts, 'equity': last_day_closing_equity}])
+            full_equity_history.append(no_trade_equity_df)
+
+    final_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+    final_equity = pd.concat(full_equity_history, ignore_index=True) if full_equity_history else pd.DataFrame()
+    return final_trades, final_equity
+
 
 def process_global_backtesting():
     dm = st.session_state.data_manager 
@@ -123,96 +194,34 @@ def process_global_backtesting():
             st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
         
         df_full = df_full.tz_convert(tz_handler.display_tz)
-        all_trades, full_equity_history = [], []
-        
-        unique_dates = sorted(df_full[df_full.index.date >= st.session_state.ui_download_start].index.normalize().unique())
-        
-        progress_bar = st.progress(0, text="Procesando días...")
 
-        current_capital = st.session_state.ui_initial_capital
-        
-        first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
-        logger.info(f"Límite de pérdida para el primer trade establecido en ${first_trade_loss_stop_amount:.2f} ({st.session_state.ui_first_trade_loss_stop_pct}%)")
-
-        last_day_closing_equity = st.session_state.ui_initial_capital
-
-        for i, date in enumerate(unique_dates):
-            date_obj = date.date()
-            progress_bar.progress((i + 1) / len(unique_dates), text=f"Procesando {date_obj.strftime('%Y-%m-%d')}...")
-
-            df_prev, df_pm = dm.get_levels_data(
-                target_date=date_obj, symbol=st.session_state.ui_symbol, 
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
-                primary_exchange=st.session_state.ui_primary_exchange
-            )
-            levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
-            df_day = df_full[df_full.index.date == date_obj]
-            if df_day.empty: continue
-
-            try:
-                or_start_time = tz_handler.market_open_time
-                or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
-                or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
-                or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
-                if not or_candles.empty:
-                    levels['ORH'], levels['ORL'] = or_candles['high'].max(), or_candles['low'].min()
-            except Exception as e:
-                logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
-
-            lookback_candles = 60
-            previous_day_data = df_full[df_full.index.date < date_obj]
-            df_lookback = previous_day_data.tail(lookback_candles)
-            df_combined_for_day = pd.concat([df_lookback, df_day])
-            day_start_index = len(df_lookback)
-
-            trades, equity_hist_array = run_fast_backtest_exact(
-                df_day_with_context=df_combined_for_day,
-                day_start_index=day_start_index,
-                day_levels={k: v for k, v in levels.items() if pd.notna(v)},
-                ema_filter_mode=st.session_state.ui_ema_filter,
-                level_ranges=config.LEVEL_RANGES,
-                initial_capital=current_capital,
-                commission_per_side=config.COMMISSION_PER_TRADE,
-                leverage=float(st.session_state.ui_leverage),
-                stop_after_first_win=True,
-                first_trade_loss_stop=first_trade_loss_stop_amount,
-                max_trades_per_day=2,
-            )
+        # --- LÓGICA DE COMPARACIÓN ---
+        if st.session_state.ui_ema_filter == "Comparar Filtros":
+            st.session_state.comparison_results = {}
+            filter_modes = ["Desactivado", "Moderado", "Fuerte"]
+            progress_bar = st.progress(0, text="Iniciando comparación...")
+            for i, mode in enumerate(filter_modes):
+                progress_bar.progress((i + 1) / len(filter_modes), text=f"Ejecutando backtest para filtro: {mode}")
+                trades, equity = run_single_backtest_iteration(df_full.copy(), tz_handler, mode)
+                st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity}
             
-            if trades.shape[0] > 0: all_trades.append(pd.DataFrame(trades, columns=["entry_time", "exit_time", "direction", "size", "entry_price", "exit_price", "pnl_net", "exit_reason"]))
-            
-            if equity_hist_array.shape[0] > 0:
-                equity_hist_df = pd.DataFrame(equity_hist_array, columns=["time", "equity"])
-                
-                daily_starting_equity = equity_hist_df['equity'].iloc[0]
-                equity_adjustment = last_day_closing_equity - daily_starting_equity
-                
-                equity_hist_df['equity'] += equity_adjustment
-                
-                full_equity_history.append(equity_hist_df)
-                
-                current_capital = equity_hist_df['equity'].iloc[-1]
-                last_day_closing_equity = current_capital
-            else:
-                if not df_day.empty:
-                    end_of_day_ts = df_day.index[-1].timestamp()
-                    no_trade_equity_df = pd.DataFrame([{'time': end_of_day_ts, 'equity': last_day_closing_equity}])
-                    full_equity_history.append(no_trade_equity_df)
+            progress_bar.empty()
+            st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
+        
+        # --- LÓGICA DE BACKTEST ÚNICO ---
+        else:
+            progress_bar = st.progress(0, text="Procesando días...")
+            st.session_state.session_trades, st.session_state.global_equity_history = run_single_backtest_iteration(
+                df_full.copy(), tz_handler, st.session_state.ui_ema_filter
+            )
+            progress_bar.empty()
+            st.session_state.app_fsm.transition_to(AppState.SHOWING_RESULTS)
 
-        progress_bar.empty()
-        st.session_state.session_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
-        st.session_state.global_equity_history = pd.concat(full_equity_history, ignore_index=True) if full_equity_history else pd.DataFrame()
-        st.session_state.app_fsm.transition_to(AppState.SHOWING_RESULTS)
     except Exception as e:
         st.error(f"Error en backtest global: {e}"); st.session_state.app_fsm.transition_to(AppState.ERROR)
     finally:
         dm.disconnect_ib()
 
-# --- BLOQUE DE CÓDIGO ELIMINADO ---
-# Se eliminan las funciones `generate_calendar_html` y `render_global_results` de este archivo.
-# Su funcionalidad ahora está en `ui/results_renderer.py`.
-# --- FIN DEL BLOQUE ELIMINADO ---
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager
@@ -283,7 +292,6 @@ def process_and_prepare_daily_data_visual():
     st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = [], [], {}
     st.session_state.app_fsm.transition_to(AppState.PAUSED)
 
-
 def close_position_manually_visual():
     executor = st.session_state.executor
     if executor.account_fsm.is_in_state(TradeState.ACTIVE):
@@ -301,7 +309,6 @@ def close_position_manually_visual():
                 }
                 st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
         st.toast("Posición cerrada manualmente.")
-
 
 def go_to_next_day_visual():
     current_date = st.session_state.ui_replay_start_date
@@ -335,7 +342,8 @@ with st.sidebar:
             step=0.5,
             help="Si la primera operación del día pierde este % del capital, se detiene el trading para ese día."
         )
-        st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte"], key="ui_ema_filter")
+        # --- OPCIONES DEL FILTRO MODIFICADAS ---
+        st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
 
@@ -364,7 +372,8 @@ if fsm.is_in_state(AppState.CONFIGURING): st.info("Ajusta los parámetros y ejec
 elif fsm.is_in_state(AppState.LOADING_DATA): process_loading_state_visual(); st.rerun()
 elif fsm.is_in_state(AppState.READY): process_and_prepare_daily_data_visual(); st.rerun()
 elif fsm.is_in_state(AppState.GLOBAL_BACKTESTING): process_global_backtesting(); st.rerun()
-elif fsm.is_in_state(AppState.SHOWING_RESULTS): render_global_results() # <-- LLAMADA A LA NUEVA FUNCIÓN
+elif fsm.is_in_state(AppState.SHOWING_RESULTS): render_global_results()
+elif fsm.is_in_state(AppState.SHOWING_COMPARISON): render_comparison_dashboard() # <-- LLAMADA AL NUEVO DASHBOARD
 elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
     df_replay = st.session_state.df_replay_display
     if df_replay.empty:
@@ -384,10 +393,12 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
 
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
         
+        # En modo visual, no se puede comparar, así que usamos el valor de la UI o 'Desactivado' por defecto
+        ema_filter = st.session_state.ui_ema_filter if st.session_state.ui_ema_filter != "Comparar Filtros" else "Desactivado"
         signal = handle_signal_request(
             historical_data=historical_data_utc, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
-            ema_filter_mode=st.session_state.ui_ema_filter,
+            ema_filter_mode=ema_filter,
             daily_candle_index=idx
         )
         

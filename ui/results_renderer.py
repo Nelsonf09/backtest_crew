@@ -8,6 +8,7 @@ import numpy as np
 import datetime
 import calendar
 import plotly.graph_objects as go
+import plotly.express as px
 
 from agent_core.metrics import calculate_performance_metrics
 
@@ -15,6 +16,7 @@ def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_e
     """Genera el HTML para el calendario de rendimiento mensual."""
     month_name = datetime.date(year, month, 1).strftime('%B %Y')
     
+    calendar.setfirstweekday(calendar.MONDAY)
     cal = calendar.monthcalendar(year, month)
 
     pnl_class = "pnl-win" if monthly_pnl >= 0 else "pnl-loss"
@@ -51,7 +53,7 @@ def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_e
     </style>
     <h3 class="monthly-summary" style="text-align: center; font-size: 20px;">{month_name} {monthly_pnl_str}</h3>
     <table class="calendar">
-        <tr><th>Dom</th><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th style="background-color: #1e1e1e;">Resumen Semanal</th></tr>
+        <tr><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th>Dom</th><th style="background-color: #1e1e1e;">Resumen Semanal</th></tr>
     """
     
     for i, week in enumerate(cal):
@@ -90,7 +92,10 @@ def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_e
     html += "</table>"
     return html
 
-def render_global_results():
+# --- MODIFICACIÓN CLAVE ---
+# Se añade el parámetro 'filter_name' con un valor por defecto
+def render_global_results(filter_name="default"):
+# --- FIN DE LA MODIFICACIÓN ---
     """Función principal para mostrar todos los componentes de la página de resultados."""
     st.header("Resultados del Backtest Global")
     
@@ -112,8 +117,6 @@ def render_global_results():
 
     st.markdown("---")
     
-    # --- INICIO DE LA MODIFICACIÓN ---
-    # CSS para personalizar las métricas y reducir su tamaño
     st.markdown("""
     <style>
     .metric-container {
@@ -145,7 +148,6 @@ def render_global_results():
     </style>
     """, unsafe_allow_html=True)
 
-    # Función de ayuda para crear el HTML de cada métrica
     def create_metric_html(label, value, delta=None, delta_color="positive"):
         delta_html = ""
         if delta:
@@ -161,7 +163,6 @@ def render_global_results():
         </div>
         """
 
-    # Renderizar las métricas personalizadas
     col1, col2, col3, col4 = st.columns(4)
 
     ganancia_neta_pct = metrics.get('Ganancia Neta Total (%)', 0)
@@ -189,7 +190,6 @@ def render_global_results():
             "Profit Factor",
             f"{metrics.get('Profit Factor', 'N/A')}"
         ), unsafe_allow_html=True)
-    # --- FIN DE LA MODIFICACIÓN ---
     
     st.markdown("---")
 
@@ -270,9 +270,24 @@ def render_global_results():
     tab1, tab2 = st.tabs(["Calendario", "Rendimiento Mensual"])
 
     with tab2:
-        monthly_pnl_chart = trades_df.set_index('entry_time_dt')['pnl_net'].resample('ME').sum()
-        monthly_pnl_chart.index = monthly_pnl_chart.index.strftime('%Y-%b')
-        st.bar_chart(monthly_pnl_chart)
+        monthly_pnl_chart = trades_df.set_index('entry_time_dt')['pnl_net'].resample('ME').sum().reset_index()
+        monthly_pnl_chart.columns = ['Mes', 'PnL']
+        monthly_pnl_chart['Mes'] = monthly_pnl_chart['Mes'].dt.strftime('%Y-%b')
+        
+        monthly_pnl_chart['Color'] = monthly_pnl_chart['PnL'].apply(lambda x: 'Ganancia' if x >= 0 else 'Pérdida')
+
+        fig_monthly_pnl = px.bar(
+            monthly_pnl_chart,
+            x='Mes',
+            y='PnL',
+            color='Color',
+            color_discrete_map={'Ganancia': '#26a69a', 'Pérdida': '#ef5350'},
+            labels={'PnL': 'Ganancia/Pérdida ($)'},
+            title='Rendimiento Mensual',
+            template="plotly_dark"
+        )
+        fig_monthly_pnl.update_xaxes(tickangle=45) 
+        st.plotly_chart(fig_monthly_pnl, use_container_width=True)
 
     with tab1:
         daily_pnl_agg = trades_df.set_index('entry_time_dt').groupby(pd.Grouper(freq='D'))['pnl_net'].agg(['sum', 'count'])
@@ -284,10 +299,13 @@ def render_global_results():
             start_date = st.session_state.ui_download_start
             
             nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-            if nav_col1.button("◀ Mes Anterior"):
+            # --- MODIFICACIÓN CLAVE ---
+            # Se añaden llaves únicas a los botones
+            if nav_col1.button("◀ Mes Anterior", key=f"prev_month_{filter_name}"):
                 st.session_state.calendar_month_offset -= 1
-            if nav_col3.button("Mes Siguiente ▶"):
+            if nav_col3.button("Mes Siguiente ▶", key=f"next_month_{filter_name}"):
                 st.session_state.calendar_month_offset += 1
+            # --- FIN DE LA MODIFICACIÓN ---
             
             current_month_start = (start_date.replace(day=1) + pd.DateOffset(months=st.session_state.calendar_month_offset))
             year, month = current_month_start.year, current_month_start.month

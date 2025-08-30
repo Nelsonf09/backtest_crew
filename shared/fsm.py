@@ -45,9 +45,10 @@ class AppState(State):
     PAUSED = auto()
     FINISHED = auto()
     ERROR = auto()
-    # --- NUEVOS ESTADOS PARA EL BACKTEST GLOBAL ---
     GLOBAL_BACKTESTING = auto()
     SHOWING_RESULTS = auto()
+    # --- NUEVO ESTADO AÑADIDO ---
+    SHOWING_COMPARISON = auto()
 
 class ConnectionState(State):
     DISCONNECTED = auto()
