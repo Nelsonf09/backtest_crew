@@ -51,6 +51,7 @@ def initialize_session_state():
     st.session_state.performance_metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
     st.session_state.comparison_results = {}
+    st.session_state.comparison_type = None # Para saber qué se está comparando
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
     st.session_state.current_index = 0
@@ -62,14 +63,14 @@ def initialize_session_state():
 
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
     st.session_state.ui_timeframe = '1 min'
-    st.session_state.ui_filter_timeframe = '1 min'
+    st.session_state.ui_filter_timeframe = config.EMA_FILTER_TIMEFRAMES[0] if config.EMA_FILTER_TIMEFRAMES else '1 min'
     st.session_state.ui_download_start = _start
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
     st.session_state.ui_display_tz = config.DEFAULT_DISPLAY_TZ
     st.session_state.ui_initial_capital = config.INITIAL_CAPITAL
     st.session_state.ui_leverage = getattr(config, 'DEFAULT_LEVERAGE', 5)
-    st.session_state.ui_backtest_mode = "Visual (Paso a Paso)"
+    st.session_state.ui_backtest_mode = "Rápido (Global)" # Cambiado para que por defecto esté el modo rápido
     st.session_state.ui_ema_filter = "Desactivado"
     st.session_state.ui_velas_atras = 100
     st.session_state.ui_mostrar_todo = False
@@ -168,6 +169,30 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
     final_equity = pd.concat(full_equity_history, ignore_index=True) if full_equity_history else pd.DataFrame()
     return final_trades, final_equity
 
+def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carga los datos de ejecución y filtro para un backtest."""
+    warmup_period = datetime.timedelta(days=30)
+    adjusted_download_start = st.session_state.ui_download_start - warmup_period
+    
+    common_params = {
+        "symbol": st.session_state.ui_symbol, "sec_type": st.session_state.ui_sec_type,
+        "exchange": st.session_state.ui_exchange, "currency": st.session_state.ui_currency,
+        "rth": st.session_state.ui_use_rth, "what_to_show": st.session_state.ui_what_to_show,
+        "download_start_date": adjusted_download_start, "download_end_date": st.session_state.ui_download_end,
+        "use_cache": st.session_state.ui_use_cache, "primary_exchange": st.session_state.ui_primary_exchange
+    }
+
+    with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
+        df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
+        
+        df_filter_raw = pd.DataFrame()
+        if filter_tf != exec_tf:
+            df_filter_raw = dm.get_main_data(timeframe=filter_tf, **common_params)
+        else:
+            # Si son el mismo, evitamos una segunda descarga innecesaria
+            df_filter_raw = df_exec_raw.copy()
+
+    return df_exec_raw, df_filter_raw
 
 def process_global_backtesting():
     dm = st.session_state.data_manager 
@@ -178,55 +203,82 @@ def process_global_backtesting():
             st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
 
     try:
-        warmup_period = datetime.timedelta(days=30)
-        adjusted_download_start = st.session_state.ui_download_start - warmup_period
-        exec_tf = '1 min'
-        filter_tf = st.session_state.ui_filter_timeframe
+        is_filter_comparison = st.session_state.ui_ema_filter == "Comparar Filtros"
+        is_timeframe_comparison = st.session_state.ui_filter_timeframe == "Comparar Timeframes"
 
-        with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
-            common_params = {
-                "symbol": st.session_state.ui_symbol, "sec_type": st.session_state.ui_sec_type,
-                "exchange": st.session_state.ui_exchange, "currency": st.session_state.ui_currency,
-                "rth": st.session_state.ui_use_rth, "what_to_show": st.session_state.ui_what_to_show,
-                "download_start_date": adjusted_download_start, "download_end_date": st.session_state.ui_download_end,
-                "use_cache": st.session_state.ui_use_cache, "primary_exchange": st.session_state.ui_primary_exchange
-            }
-            df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
-            
-            df_filter_raw = pd.DataFrame()
-            if filter_tf != exec_tf:
-                df_filter_raw = dm.get_main_data(timeframe=filter_tf, **common_params)
+        if is_filter_comparison and is_timeframe_comparison:
+            st.error("No se pueden ejecutar ambas comparaciones a la vez. Por favor, elija solo una.")
+            st.session_state.app_fsm.transition_to(AppState.CONFIGURING)
+            return
 
-        if df_exec_raw.empty:
-            st.warning("No se obtuvieron datos para el timeframe de ejecución."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
-        
-        with st.spinner("Calculando indicadores técnicos..."):
-            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw if not df_filter_raw.empty else None)
-        
-        df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
-
-        if st.session_state.ui_ema_filter == "Comparar Filtros":
+        # Lógica de Comparación de Timeframes
+        if is_timeframe_comparison:
+            st.session_state.comparison_type = "Timeframes de Filtro"
             st.session_state.comparison_results = {}
-            filter_modes = ["Desactivado", "Moderado", "Fuerte"]
-            progress_bar = st.progress(0, text="Iniciando comparación...")
-            for i, mode in enumerate(filter_modes):
-                progress_bar.progress((i + 1) / len(filter_modes), text=f"Ejecutando backtest para filtro: {mode}")
+            timeframes_to_compare = config.EMA_FILTER_TIMEFRAMES
+            progress_bar = st.progress(0, text="Iniciando comparación de timeframes...")
+            fixed_ema_filter_mode = st.session_state.ui_ema_filter
+
+            for i, tf in enumerate(timeframes_to_compare):
+                text = f"Ejecutando para timeframe: {tf} (Filtro: {fixed_ema_filter_mode})"
+                progress_bar.progress((i + 1) / len(timeframes_to_compare), text=text)
+
+                df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', tf)
+                if df_exec_raw.empty:
+                    logger.warning(f"No hay datos de ejecución, saltando timeframe {tf}.")
+                    continue
+                df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+                df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
+                
+                trades, equity = run_single_backtest_iteration(df_enriched_local, tz_handler, fixed_ema_filter_mode)
+                st.session_state.comparison_results[tf] = {'trades': trades, 'equity': equity}
+
+            progress_bar.empty()
+            st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
+
+        # Lógica de Comparación de Filtros EMA
+        elif is_filter_comparison:
+            st.session_state.comparison_type = "Modos de Filtro EMA"
+            st.session_state.comparison_results = {}
+            filter_modes_to_compare = ["Desactivado", "Moderado", "Fuerte"]
+            progress_bar = st.progress(0, text="Iniciando comparación de filtros EMA...")
+            fixed_filter_tf = st.session_state.ui_filter_timeframe
+
+            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', fixed_filter_tf)
+            if df_exec_raw.empty:
+                st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
+
+            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+            df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
+
+            for i, mode in enumerate(filter_modes_to_compare):
+                progress_bar.progress((i + 1) / len(filter_modes_to_compare), text=f"Ejecutando para filtro: {mode} (Timeframe: {fixed_filter_tf})")
                 trades, equity = run_single_backtest_iteration(df_enriched_local.copy(), tz_handler, mode)
                 st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity}
             
             progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
         
+        # Lógica de Backtest Único
         else:
+            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', st.session_state.ui_filter_timeframe)
+            if df_exec_raw.empty:
+                st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
+
+            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+            df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
+            
             st.session_state.session_trades, st.session_state.global_equity_history = run_single_backtest_iteration(
                 df_enriched_local.copy(), tz_handler, st.session_state.ui_ema_filter
             )
             st.session_state.app_fsm.transition_to(AppState.SHOWING_RESULTS)
 
     except Exception as e:
-        st.error(f"Error en backtest global: {e}", exc_info=True); st.session_state.app_fsm.transition_to(AppState.ERROR)
+        logger.error(f"Error en backtest global: {e}", exc_info=True)
+        st.error(f"Error en backtest global: {e}")
+        st.session_state.app_fsm.transition_to(AppState.ERROR)
     finally:
-        dm.disconnect_ib() # Se desconecta después de la ejecución
+        dm.disconnect_ib()
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager
@@ -353,11 +405,12 @@ with st.sidebar:
             step=0.5,
             help="Si la primera operación del día pierde este % del capital, se detiene el trading para ese día."
         )
+        timeframe_options = config.EMA_FILTER_TIMEFRAMES + ["Comparar Timeframes"]
         st.selectbox(
             "Timeframe del Filtro EMA", 
-            options=['1 min', '3 mins', '5 mins', '15 mins', '30 mins', '1 hour'], 
+            options=timeframe_options, 
             key="ui_filter_timeframe",
-            help="Timeframe para calcular las EMAs. '1 min' usa el mismo timeframe que la ejecución."
+            help="Timeframe para calcular las EMAs. '1 min' usa el mismo que la ejecución."
         )
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
@@ -513,4 +566,3 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         st.dataframe(trades_df_display)
     else: st.text("No hay operaciones cerradas en esta sesión.")
 elif fsm.is_in_state(AppState.ERROR): st.error("Ha ocurrido un error. Revisa la configuración y los logs.")
-

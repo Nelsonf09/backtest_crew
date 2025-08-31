@@ -30,12 +30,17 @@ DEFAULT_DISPLAY_TZ = 'America/New_York'
 
 # --- Configuración de Timeframe y Rango de Datos ---
 DEFAULT_TIMEFRAME = '1 min'
+# --- INICIO DE LA MODIFICACIÓN ---
+# Lista de timeframes para el filtro EMA, ahora centralizada.
+EMA_FILTER_TIMEFRAMES = [
+    '1 min', '5 mins', '15 mins'
+]
+# --- FIN DE LA MODIFICACIÓN ---
 DEFAULT_DATA_DURATION = '5 D'
 USE_RTH = False
 WHAT_TO_SHOW = 'TRADES'
 
 # --- Configuración de Niveles y Estrategia ---
-# --- LÍNEA AÑADIDA PARA CORREGIR EL ERROR ---
 LEVEL_RANGES = {
     'PDH': 0.5, 'PDL': 0.5, 'PMH': 0.3, 'PML': 0.3, 'ORH': 0.2, 'ORL': 0.2
 }
@@ -58,4 +63,3 @@ INITIAL_CAPITAL = 1000.0
 COMMISSION_PER_TRADE = 0.85
 SLIPPAGE_POINTS = 0.0
 DEFAULT_LEVERAGE = 5
-

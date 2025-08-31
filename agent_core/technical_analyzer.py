@@ -42,12 +42,26 @@ def add_technical_indicators(
     
     df_emas = pd.DataFrame(ema_cols, index=source_df_for_emas.index)
 
-    # Si los timeframes son diferentes, alinear y rellenar
+    # --- INICIO DE LA MODIFICACIÓN CLAVE ---
+    
+    # Paso 1: Unir los DataFrames. Esto crea valores NaN en df_to_enrich donde no hay una EMA 
+    # del timeframe superior que coincida exactamente.
     if source_df_for_emas is not df_exec:
-        df_to_enrich = df_to_enrich.join(df_emas, how='left').ffill()
-    else: # Si es el mismo timeframe, simplemente unir
-        df_to_enrich = df_to_enrich.join(df_emas, how='left')
+        df_with_gaps = df_to_enrich.join(df_emas, how='left')
+    else: # Si es el mismo timeframe, simplemente unir. No habrá gaps.
+        df_with_gaps = df_to_enrich.join(df_emas, how='left')
+        return df_with_gaps
 
-    logger.info("DataFrame enriquecido con indicadores técnicos.")
-    return df_to_enrich
+    # Paso 2: Aplicar el forward-fill (ffill) de manera segmentada por día.
+    # Se agrupan los datos por la fecha del índice y se aplica ffill() a cada grupo.
+    # Esto previene que el último valor de un día se "arrastre" al inicio del día siguiente.
+    if not isinstance(df_with_gaps.index, pd.DatetimeIndex):
+        logger.warning("El índice del DataFrame no es de tipo DatetimeIndex. Intentando convertir.")
+        df_with_gaps.index = pd.to_datetime(df_with_gaps.index, utc=True)
 
+    df_enriched_corrected = df_with_gaps.groupby(df_with_gaps.index.date).ffill()
+    
+    # --- FIN DE LA MODIFICACIÓN CLAVE ---
+
+    logger.info("DataFrame enriquecido con indicadores técnicos (corrección anti-fuga aplicada).")
+    return df_enriched_corrected

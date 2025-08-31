@@ -92,10 +92,7 @@ def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_e
     html += "</table>"
     return html
 
-# --- MODIFICACIÓN CLAVE ---
-# Se añade el parámetro 'filter_name' con un valor por defecto
 def render_global_results(filter_name="default"):
-# --- FIN DE LA MODIFICACIÓN ---
     """Función principal para mostrar todos los componentes de la página de resultados."""
     st.header("Resultados del Backtest Global")
     
@@ -270,23 +267,40 @@ def render_global_results(filter_name="default"):
     tab1, tab2 = st.tabs(["Calendario", "Rendimiento Mensual"])
 
     with tab2:
+        # --- INICIO DE LA SOLUCIÓN DEFINITIVA ---
+        # 1. Agrupar y ordenar cronológicamente (sigue siendo necesario)
         monthly_pnl_chart = trades_df.set_index('entry_time_dt')['pnl_net'].resample('ME').sum().reset_index()
-        monthly_pnl_chart.columns = ['Mes', 'PnL']
-        monthly_pnl_chart['Mes'] = monthly_pnl_chart['Mes'].dt.strftime('%Y-%b')
+        monthly_pnl_chart.columns = ['Mes_dt', 'PnL']
+        monthly_pnl_chart = monthly_pnl_chart.sort_values(by='Mes_dt', ascending=True)
         
-        monthly_pnl_chart['Color'] = monthly_pnl_chart['PnL'].apply(lambda x: 'Ganancia' if x >= 0 else 'Pérdida')
-
-        fig_monthly_pnl = px.bar(
-            monthly_pnl_chart,
-            x='Mes',
-            y='PnL',
-            color='Color',
-            color_discrete_map={'Ganancia': '#26a69a', 'Pérdida': '#ef5350'},
-            labels={'PnL': 'Ganancia/Pérdida ($)'},
-            title='Rendimiento Mensual',
-            template="plotly_dark"
+        # 2. Crear las etiquetas de texto
+        monthly_pnl_chart['Mes'] = monthly_pnl_chart['Mes_dt'].dt.strftime('%Y-%b')
+        
+        # 3. (CLAVE) Crear una lista de colores manual que coincida con el orden de las barras
+        bar_colors = ['#26a69a' if pnl >= 0 else '#ef5350' for pnl in monthly_pnl_chart['PnL']]
+        
+        # 4. Usar plotly.graph_objects (go) para un control total
+        fig_monthly_pnl = go.Figure()
+        
+        # 5. Añadir la traza de barras con los colores manuales
+        fig_monthly_pnl.add_trace(go.Bar(
+            x=monthly_pnl_chart['Mes'],
+            y=monthly_pnl_chart['PnL'],
+            marker_color=bar_colors,
+            name='PnL Mensual'
+        ))
+        
+        # 6. Configurar el layout para que coincida con el estilo anterior
+        fig_monthly_pnl.update_layout(
+            title_text='Rendimiento Mensual',
+            xaxis_title='Mes',
+            yaxis_title='Ganancia/Pérdida ($)',
+            template="plotly_dark",
+            showlegend=False # La leyenda de color ya no es necesaria
         )
         fig_monthly_pnl.update_xaxes(tickangle=45) 
+        # --- FIN DE LA SOLUCIÓN DEFINITIVA ---
+        
         st.plotly_chart(fig_monthly_pnl, use_container_width=True)
 
     with tab1:
@@ -299,13 +313,10 @@ def render_global_results(filter_name="default"):
             start_date = st.session_state.ui_download_start
             
             nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-            # --- MODIFICACIÓN CLAVE ---
-            # Se añaden llaves únicas a los botones
             if nav_col1.button("◀ Mes Anterior", key=f"prev_month_{filter_name}"):
                 st.session_state.calendar_month_offset -= 1
             if nav_col3.button("Mes Siguiente ▶", key=f"next_month_{filter_name}"):
                 st.session_state.calendar_month_offset += 1
-            # --- FIN DE LA MODIFICACIÓN ---
             
             current_month_start = (start_date.replace(day=1) + pd.DateOffset(months=st.session_state.calendar_month_offset))
             year, month = current_month_start.year, current_month_start.month
@@ -345,3 +356,4 @@ def render_global_results(filter_name="default"):
     trades_display['exit_time_str'] = pd.to_datetime(trades_display['exit_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
     
     st.dataframe(trades_display[['entry_time_str', 'exit_time_str', 'direction', 'size', 'entry_price', 'exit_price', 'pnl_net', 'exit_reason']])
+
