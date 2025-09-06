@@ -136,6 +136,7 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
         df_combined_for_day = pd.concat([df_lookback, df_day])
         day_start_index = len(df_lookback)
 
+        market_type = "forex" if st.session_state.ui_sec_type == "FOREX" else "stocks"
         trades, equity_hist_array = run_fast_backtest_exact(
             df_day_with_context=df_combined_for_day,
             day_start_index=day_start_index,
@@ -145,6 +146,8 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
             initial_capital=current_capital,
             commission_per_side=config.COMMISSION_PER_TRADE,
             leverage=float(st.session_state.ui_leverage),
+             market=market_type,
+             symbol=st.session_state.ui_symbol,
             stop_after_first_win=True,
             first_trade_loss_stop=first_trade_loss_stop_amount,
             max_trades_per_day=2,
