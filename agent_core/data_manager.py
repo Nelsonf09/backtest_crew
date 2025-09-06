@@ -7,7 +7,6 @@ import logging
 from pathlib import Path
 import pandas as pd
 import datetime
-from dateutil.relativedelta import relativedelta # <-- IMPORTACIÓN AÑADIDA
 from ib_insync import IB, util, Contract, Forex, Stock, Future, Index
 import config
 import pytz
@@ -265,54 +264,73 @@ class DataManager:
             exchange = "IDEALPRO"
             if what_to_show.upper() == "TRADES":
                 what_to_show = "MIDPOINT"
+        # Política de chunking y pausa según el timeframe para forex
+        pause_between_chunks = 0.0
+        if market == "forex":
+            tf_lower = timeframe.strip().lower()
+            if tf_lower == "1 min":
+                chunk_days = 1
+                duration_req_chunk = "1 D"
+                pause_between_chunks = 0.5
+            elif tf_lower == "5 mins":
+                chunk_days = 5
+                duration_req_chunk = "5 D"
+                pause_between_chunks = 0.5
+            else:
+                chunk_days = 30
+                duration_req_chunk = "1 M"
+        else:
+            chunk_days = 30
+            duration_req_chunk = "1 M"
+
         contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
         all_dfs = []
         current_start = download_start_date
-        
+
         logger.info(f"Iniciando obtención de datos para el rango {download_start_date} a {download_end_date}.")
 
         while current_start <= download_end_date:
-            # Calcular el final del fragmento (1 mes después, sin pasar la fecha final total)
-            current_end = current_start + relativedelta(months=1) - datetime.timedelta(days=1)
+            # Calcular el final del fragmento sin exceder la fecha final total
+            current_end = current_start + datetime.timedelta(days=chunk_days - 1)
             if current_end > download_end_date:
                 current_end = download_end_date
-            
+
             df_chunk = None
-            
+
             # Generar nombre de archivo de caché para este fragmento específico
             chunk_start_str = current_start.strftime('%Y%m%d')
             chunk_end_str = current_end.strftime('%Y%m%d')
             chunk_cache_filename = self._get_cache_filename(
-                f"CHUNK_{timeframe.replace(' ','')}", symbol, timeframe, 
+                f"CHUNK_{timeframe.replace(' ','')}", symbol, timeframe,
                 chunk_start_str, chunk_end_str, sec_type, exchange, rth
             )
 
+            loaded_from_cache = False
             if use_cache:
                 df_chunk = self._load_data_from_cache(chunk_cache_filename)
+                if df_chunk is not None and not df_chunk.empty:
+                    logger.info(f"Cargando fragmento desde caché: {chunk_cache_filename.name}")
+                    loaded_from_cache = True
 
-            if df_chunk is not None and not df_chunk.empty:
-                logger.info(f"Cargando fragmento desde caché: {chunk_cache_filename.name}")
-            else:
+            if not loaded_from_cache:
                 logger.info(f"Fragmento no encontrado en caché. Descargando: {current_start.strftime('%Y-%m-%d')} a {current_end.strftime('%Y-%m-%d')}")
-                
+
                 # Preparar parámetros para la API para este fragmento
                 end_dt_market_chunk = self.MARKET_TZ.localize(datetime.datetime.combine(current_end, datetime.time(23, 59, 59)))
                 end_dt_utc_req_chunk = end_dt_market_chunk.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
-                duration_req_chunk = '1 M' # La duración máxima para datos de 1 min es 1 mes.
-                
+
                 df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk, timeframe, rth, what_to_show)
-                
+
                 if df_chunk is not None and not df_chunk.empty and use_cache:
                     # Guardar el fragmento recién descargado en su propio archivo de caché
                     self._save_data_to_cache(df_chunk.copy(), chunk_cache_filename)
-            
+
+                if pause_between_chunks > 0:
+                    time.sleep(pause_between_chunks)
+
             if df_chunk is not None and not df_chunk.empty:
                 all_dfs.append(df_chunk)
-            
-            # Pausa para no saturar la API, especialmente si estamos descargando mucho
-            if df_chunk is None or df_chunk.empty:
-                 time.sleep(2) 
-            
+
             # Moverse al siguiente fragmento
             current_start = current_end + datetime.timedelta(days=1)
 
