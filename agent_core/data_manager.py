@@ -184,24 +184,34 @@ class DataManager:
             logger.error(f"Error cargando o procesando caché {filename}: {e}", exc_info=True)
             return None 
 
-    def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str, 
-                        timeframe_daily='1 day', timeframe_intra='5 mins', 
-                        premarket_start_hour=4, market_open_hour=9, market_open_minute=30, 
-                        use_cache=True, **contract_kwargs):
+    def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str,
+                        timeframe_daily='1 day', timeframe_intra='5 mins',
+                        premarket_start_hour=4, market_open_hour=9, market_open_minute=30,
+                        use_cache=True, market: str = "stocks", **contract_kwargs):
         df_previous_day = pd.DataFrame()
         df_premarket = pd.DataFrame()
-        
+
+        market = (market or "stocks").lower()
+        if market == "forex":
+            sec_type = "FOREX"
+            exchange = "IDEALPRO"
+            what_to_show = "MIDPOINT"
+            rth_prev_day = False
+        else:
+            what_to_show = "TRADES"
+            rth_prev_day = True
+
         prev_business_day = (pd.Timestamp(target_date) - pd.tseries.offsets.BDay(1)).date()
         prev_day_str = prev_business_day.strftime('%Y%m%d')
-        cache_filename_pd = self._get_cache_filename("PD", symbol, timeframe_daily, prev_day_str, prev_day_str, sec_type, exchange, rth=True)
-        
+        cache_filename_pd = self._get_cache_filename("PD", symbol, timeframe_daily, prev_day_str, prev_day_str, sec_type, exchange, rth=rth_prev_day)
+
         if use_cache: df_previous_day = self._load_data_from_cache(cache_filename_pd)
 
         if df_previous_day is None or df_previous_day.empty:
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
             end_dt_prev_day_market = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time(23, 59, 59)))
             end_dt_prev_day_utc_str = end_dt_prev_day_market.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
-            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, True, 'TRADES')
+            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, rth_prev_day, what_to_show)
             if df_fetched_pd is not None and not df_fetched_pd.empty:
                 start_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.min)).astimezone(self.UTC_TZ)
                 end_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.max)).astimezone(self.UTC_TZ)
@@ -221,7 +231,7 @@ class DataManager:
             duration_str_pm = f"{max(120, duration_seconds_pm + 120)} S"
             
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
-            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, False, 'TRADES')
+            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, False, what_to_show)
             if df_fetched_pm is not None and not df_fetched_pm.empty:
                 start_utc = start_dt_pm_market.astimezone(self.UTC_TZ)
                 end_utc = end_dt_pm_market.astimezone(self.UTC_TZ)
@@ -244,11 +254,17 @@ class DataManager:
         return {'PMH': pmh if pd.notna(pmh) else None, 'PML': pml if pd.notna(pml) else None}
 
     def get_main_data(self, symbol: str, timeframe: str, sec_type: str, exchange: str, currency: str, rth: bool, what_to_show: str,
-                      download_start_date: datetime.date, download_end_date: datetime.date, 
-                      use_cache=True, **kwargs) -> pd.DataFrame:
+                      download_start_date: datetime.date, download_end_date: datetime.date,
+                      use_cache=True, market: str = "stocks", **kwargs) -> pd.DataFrame:
         
         # --- INICIO DE LA LÓGICA DE CACHÉ INTELIGENTE Y DESCARGA POR FRAGMENTOS ---
         
+        market = (market or "stocks").lower()
+        if market == "forex":
+            sec_type = "FOREX"
+            exchange = "IDEALPRO"
+            if what_to_show.upper() == "TRADES":
+                what_to_show = "MIDPOINT"
         contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
         all_dfs = []
         current_start = download_start_date
