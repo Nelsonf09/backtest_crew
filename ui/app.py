@@ -63,7 +63,12 @@ def initialize_session_state():
 
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
     st.session_state.ui_timeframe = '1 min'
-    st.session_state.ui_filter_timeframe = config.EMA_FILTER_TIMEFRAMES[0] if config.EMA_FILTER_TIMEFRAMES else '1 min'
+    st.session_state.ui_exec_timeframe = '1 min'
+    st.session_state.ui_filter_timeframe = (
+        '5 mins'
+        if '5 mins' in config.EMA_FILTER_TIMEFRAMES
+        else (config.EMA_FILTER_TIMEFRAMES[0] if config.EMA_FILTER_TIMEFRAMES else '1 min')
+    )
     st.session_state.ui_download_start = _start
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
@@ -269,7 +274,7 @@ def process_global_backtesting():
         if is_timeframe_comparison:
             st.session_state.comparison_type = "Timeframes de Filtro"
             st.session_state.comparison_results = {}
-            timeframes_to_compare = config.EMA_FILTER_TIMEFRAMES
+            timeframes_to_compare = get_filter_timeframe_options(st.session_state.ui_market)
             progress_bar = st.progress(0, text="Iniciando comparación de timeframes...")
             fixed_ema_filter_mode = st.session_state.ui_ema_filter
 
@@ -277,7 +282,7 @@ def process_global_backtesting():
                 text = f"Ejecutando para timeframe: {tf} (Filtro: {fixed_ema_filter_mode})"
                 progress_bar.progress((i + 1) / len(timeframes_to_compare), text=text)
 
-                df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', tf)
+                df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, tf)
                 if df_exec_raw.empty:
                     logger.warning(f"No hay datos de ejecución, saltando timeframe {tf}.")
                     continue
@@ -298,7 +303,7 @@ def process_global_backtesting():
             progress_bar = st.progress(0, text="Iniciando comparación de filtros EMA...")
             fixed_filter_tf = st.session_state.ui_filter_timeframe
 
-            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', fixed_filter_tf)
+            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, fixed_filter_tf)
             if df_exec_raw.empty:
                 st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
 
@@ -315,7 +320,7 @@ def process_global_backtesting():
         
         # Lógica de Backtest Único
         else:
-            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, '1 min', st.session_state.ui_filter_timeframe)
+            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, st.session_state.ui_filter_timeframe)
             if df_exec_raw.empty:
                 st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
 
@@ -435,6 +440,16 @@ def go_to_next_day_visual():
     else: st.toast("No hay más días con datos.")
 
 
+def get_exec_timeframe_options(market: str) -> list[str]:
+    """Devuelve opciones de timeframe de ejecución según el mercado."""
+    return ["1 min", "5 mins"] if market == "forex" else ["1 min", "3 mins", "5 mins"]
+
+
+def get_filter_timeframe_options(market: str) -> list[str]:
+    """Devuelve opciones de timeframe para el filtro EMA según el mercado."""
+    return ["1 min", "5 mins"] if market == "forex" else config.EMA_FILTER_TIMEFRAMES
+
+
 def handle_market_change():
     """Reasigna selectores cuando cambia el mercado."""  # MARKET-AWARE UI
     market = st.session_state.ui_market
@@ -451,6 +466,17 @@ def handle_market_change():
         )
         st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
     st.session_state.ui_what_to_show = "TRADES"
+
+    exec_options = get_exec_timeframe_options(market)
+    if st.session_state.ui_exec_timeframe not in exec_options:
+        st.session_state.ui_exec_timeframe = exec_options[0]
+
+    filter_options = get_filter_timeframe_options(market)
+    if (
+        st.session_state.ui_filter_timeframe not in filter_options
+        and st.session_state.ui_filter_timeframe != "Comparar Timeframes"
+    ):
+        st.session_state.ui_filter_timeframe = filter_options[0]
 
 with st.sidebar:
     st.title("Configuración")
@@ -511,12 +537,28 @@ with st.sidebar:
             step=0.5,
             help="Si la primera operación del día pierde este % del capital, se detiene el trading para ese día."
         )
-        timeframe_options = config.EMA_FILTER_TIMEFRAMES + ["Comparar Timeframes"]
+        exec_tf_options = get_exec_timeframe_options(st.session_state.ui_market)
+        if st.session_state.ui_exec_timeframe not in exec_tf_options:
+            st.session_state.ui_exec_timeframe = exec_tf_options[0]
         st.selectbox(
-            "Timeframe del Filtro EMA", 
-            options=timeframe_options, 
+            "Timeframe de Ejecución",
+            options=exec_tf_options,
+            key="ui_exec_timeframe",
+            help="Timeframe de Ejecución = timeframe base de las velas en las que se abren/cerran operaciones. El Filtro EMA puede usar un timeframe igual o superior.",
+        )
+
+        filter_tf_base_options = get_filter_timeframe_options(st.session_state.ui_market)
+        if (
+            st.session_state.ui_filter_timeframe not in filter_tf_base_options
+            and st.session_state.ui_filter_timeframe != "Comparar Timeframes"
+        ):
+            st.session_state.ui_filter_timeframe = filter_tf_base_options[0]
+        timeframe_options = filter_tf_base_options + ["Comparar Timeframes"]
+        st.selectbox(
+            "Timeframe del Filtro EMA",
+            options=timeframe_options,
             key="ui_filter_timeframe",
-            help="Timeframe para calcular las EMAs. '1 min' usa el mismo que la ejecución."
+            help="Timeframe para calcular las EMAs. Puede ser igual o superior al de ejecución.",
         )
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
