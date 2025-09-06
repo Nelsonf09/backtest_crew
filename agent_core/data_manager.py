@@ -192,6 +192,18 @@ class DataManager:
             return False, "MIDPOINT"
         return rth, what_to_show
 
+    def _get_chunk_params(self, market: str, timeframe: str) -> tuple[int, str, float]:
+        """Devuelve (días_por_chunk, duración_IB, pausa) según mercado/timeframe."""
+        market = (market or "stocks").lower()
+        tf_lower = timeframe.strip().lower()
+        if market == "forex":
+            if tf_lower == "1 min":
+                return 1, "1 D", 0.5
+            if tf_lower == "5 mins":
+                return 5, "5 D", 0.5
+            return 30, "1 M", 0.0
+        return 30, "1 M", 0.0
+
     def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str,
                         timeframe_daily='1 day', timeframe_intra='5 mins',
                         premarket_start_hour=4, market_open_hour=9, market_open_minute=30,
@@ -235,16 +247,19 @@ class DataManager:
             start_dt_pm_market = self.MARKET_TZ.localize(datetime.datetime.combine(target_date, datetime.time(premarket_start_hour, 0)))
             end_dt_pm_market = self.MARKET_TZ.localize(datetime.datetime.combine(target_date, datetime.time(market_open_hour, market_open_minute))) - datetime.timedelta(seconds=1)
             end_dt_pm_utc_req_str = end_dt_pm_market.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
-            duration_seconds_pm = int((end_dt_pm_market - start_dt_pm_market).total_seconds())
-            duration_str_pm = f"{max(120, duration_seconds_pm + 120)} S"
-            
+
+            _, duration_pm, pause_pm = self._get_chunk_params(market, timeframe_intra)
+
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
-            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, rth_premarket, what_to_show)
+            df_fetched_pm = self._fetch_chunk_with_retry(contract_obj, end_dt_pm_utc_req_str, duration_pm, timeframe_intra, rth_premarket, what_to_show, market)
             if df_fetched_pm is not None and not df_fetched_pm.empty:
                 start_utc = start_dt_pm_market.astimezone(self.UTC_TZ)
                 end_utc = end_dt_pm_market.astimezone(self.UTC_TZ)
                 df_premarket = df_fetched_pm[(df_fetched_pm.index >= start_utc) & (df_fetched_pm.index <= end_utc)]
-                if use_cache and not df_premarket.empty: self._save_data_to_cache(df_premarket.copy(), cache_filename_pm)
+                if use_cache and not df_premarket.empty:
+                    self._save_data_to_cache(df_premarket.copy(), cache_filename_pm)
+                if pause_pm > 0:
+                    time.sleep(pause_pm)
 
         return (df_previous_day if df_previous_day is not None else pd.DataFrame(),
                 df_premarket if df_premarket is not None else pd.DataFrame())
@@ -299,24 +314,8 @@ class DataManager:
 
         rth, what_to_show = self._normalize_fetch_params(market, rth, what_to_show)
 
-        # Política de chunking y pausa según el timeframe para forex
-        pause_between_chunks = 0.0
-        if market == "forex":
-            tf_lower = timeframe.strip().lower()
-            if tf_lower == "1 min":
-                chunk_days = 1
-                duration_req_chunk = "1 D"
-                pause_between_chunks = 0.5
-            elif tf_lower == "5 mins":
-                chunk_days = 5
-                duration_req_chunk = "5 D"
-                pause_between_chunks = 0.5
-            else:
-                chunk_days = 30
-                duration_req_chunk = "1 M"
-        else:
-            chunk_days = 30
-            duration_req_chunk = "1 M"
+        # Política de chunking y pausa según el timeframe/mercado
+        chunk_days, duration_req_chunk, pause_between_chunks = self._get_chunk_params(market, timeframe)
 
         contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
         all_dfs = []
