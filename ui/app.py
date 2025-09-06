@@ -440,6 +440,17 @@ def go_to_next_day_visual():
     else: st.toast("No hay más días con datos.")
 
 
+def timeframe_to_minutes(tf: str) -> int:
+    """Convierte un timeframe en minutos."""
+    value, unit = tf.split()
+    minutes = int(value)
+    if unit.startswith("hour"):
+        minutes *= 60
+    elif unit.startswith("day"):
+        minutes *= 60 * 24
+    return minutes
+
+
 def get_exec_timeframe_options(market: str) -> list[str]:
     """Devuelve opciones de timeframe de ejecución según el mercado."""
     return ["1 min", "5 mins"] if market == "forex" else ["1 min", "3 mins", "5 mins"]
@@ -547,6 +558,9 @@ with st.sidebar:
             help="Timeframe de Ejecución = timeframe base de las velas en las que se abren/cerran operaciones. El Filtro EMA puede usar un timeframe igual o superior.",
         )
 
+        if st.session_state.ui_market == "forex" and st.session_state.ui_exec_timeframe == "1 min":
+            st.caption("Para rangos largos usa 1–3 días; el sistema fragmenta las descargas para evitar timeouts de HMDS.")
+
         filter_tf_base_options = get_filter_timeframe_options(st.session_state.ui_market)
         if (
             st.session_state.ui_filter_timeframe not in filter_tf_base_options
@@ -560,6 +574,12 @@ with st.sidebar:
             key="ui_filter_timeframe",
             help="Timeframe para calcular las EMAs. Puede ser igual o superior al de ejecución.",
         )
+
+        if st.session_state.ui_filter_timeframe != "Comparar Timeframes":
+            exec_minutes = timeframe_to_minutes(st.session_state.ui_exec_timeframe)
+            filter_minutes = timeframe_to_minutes(st.session_state.ui_filter_timeframe)
+            if filter_minutes < exec_minutes:
+                st.warning("Se recomienda usar un timeframe del filtro EMA >= al de ejecución.")
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
