@@ -177,18 +177,56 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
     """Carga los datos de ejecución y filtro para un backtest."""
     warmup_period = datetime.timedelta(days=30)
     adjusted_download_start = st.session_state.ui_download_start - warmup_period
-    
-    common_params = {
-        "symbol": st.session_state.ui_symbol, "sec_type": st.session_state.ui_sec_type,
-        "exchange": st.session_state.ui_exchange, "currency": st.session_state.ui_currency,
-        "rth": st.session_state.ui_use_rth, "what_to_show": st.session_state.ui_what_to_show,
-        "download_start_date": adjusted_download_start, "download_end_date": st.session_state.ui_download_end,
-        "use_cache": st.session_state.ui_use_cache, "primary_exchange": st.session_state.ui_primary_exchange
-    }
+
+    market = st.session_state.ui_market
+    if market == "forex":
+        if st.session_state.ui_primary_exchange:
+            st.info("Primary Exchange no aplica en Forex y será ignorado.")
+        symbol_list = getattr(config, "FOREX_SYMBOLS", [])
+        exchange_list = getattr(config, "FOREX_EXCHANGES", [])
+        if st.session_state.ui_symbol not in symbol_list:
+            st.session_state.ui_symbol = symbol_list[0] if symbol_list else st.session_state.ui_symbol
+        if st.session_state.ui_exchange not in exchange_list:
+            st.session_state.ui_exchange = exchange_list[0] if exchange_list else st.session_state.ui_exchange
+
+        common_params = {
+            "symbol": st.session_state.ui_symbol,
+            "sec_type": "FOREX",
+            "exchange": st.session_state.ui_exchange or "IDEALPRO",
+            "currency": st.session_state.ui_currency or "USD",
+            "rth": st.session_state.ui_use_rth,
+            "what_to_show": st.session_state.ui_what_to_show,
+            "download_start_date": adjusted_download_start,
+            "download_end_date": st.session_state.ui_download_end,
+            "use_cache": st.session_state.ui_use_cache,
+            "primary_exchange": None,
+            "market": "forex",
+        }
+    else:
+        symbol_list = getattr(config, "STOCK_SYMBOLS_LIST", [])
+        exchange_list = getattr(config, "STOCKS_EXCHANGES", [])
+        if st.session_state.ui_symbol not in symbol_list:
+            st.session_state.ui_symbol = symbol_list[0] if symbol_list else st.session_state.ui_symbol
+        if st.session_state.ui_exchange not in exchange_list:
+            st.session_state.ui_exchange = exchange_list[0] if exchange_list else st.session_state.ui_exchange
+
+        common_params = {
+            "symbol": st.session_state.ui_symbol,
+            "sec_type": st.session_state.ui_sec_type,
+            "exchange": st.session_state.ui_exchange,
+            "currency": st.session_state.ui_currency,
+            "rth": st.session_state.ui_use_rth,
+            "what_to_show": st.session_state.ui_what_to_show,
+            "download_start_date": adjusted_download_start,
+            "download_end_date": st.session_state.ui_download_end,
+            "use_cache": st.session_state.ui_use_cache,
+            "primary_exchange": st.session_state.ui_primary_exchange or None,
+            "market": "stocks",
+        }
 
     with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
         df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
-        
+
         df_filter_raw = pd.DataFrame()
         if filter_tf != exec_tf:
             df_filter_raw = dm.get_main_data(timeframe=filter_tf, **common_params)
@@ -199,9 +237,21 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
     return df_exec_raw, df_filter_raw
 
 def process_global_backtesting():
-    dm = st.session_state.data_manager 
+    dm = st.session_state.data_manager
     tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
-    
+
+    market = st.session_state.ui_market
+    if market == "forex" and st.session_state.ui_primary_exchange:
+        st.info("Primary Exchange no aplica en Forex y será ignorado.")
+        st.session_state.ui_primary_exchange = ""
+    symbol_list = config.FOREX_SYMBOLS if market == "forex" else config.STOCK_SYMBOLS_LIST
+    if st.session_state.ui_symbol not in symbol_list:
+        st.info(f"Símbolo inválido para {market}, ajustado a {symbol_list[0]}.")
+        st.session_state.ui_symbol = symbol_list[0]
+    exchange_list = config.FOREX_EXCHANGES if market == "forex" else config.STOCKS_EXCHANGES
+    if st.session_state.ui_exchange not in exchange_list:
+        st.session_state.ui_exchange = exchange_list[0]
+
     with st.spinner("Conectando a IB..."):
         if not dm.connect_ib():
             st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
