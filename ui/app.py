@@ -75,6 +75,7 @@ def initialize_session_state():
     st.session_state.ui_velas_atras = 100
     st.session_state.ui_mostrar_todo = False
     st.session_state.ui_autoplay_speed = 0.5
+    st.session_state.ui_market = "stocks"  # MARKET-AWARE UI
     st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
     st.session_state.ui_exchange = config.DEFAULT_EXCHANGE
     st.session_state.ui_currency = config.DEFAULT_CURRENCY
@@ -383,18 +384,64 @@ def go_to_next_day_visual():
     if next_day: st.session_state.ui_replay_start_date = next_day; st.session_state.app_fsm.transition_to(AppState.READY)
     else: st.toast("No hay más días con datos.")
 
+
+def handle_market_change():
+    """Reasigna selectores cuando cambia el mercado."""  # MARKET-AWARE UI
+    market = st.session_state.ui_market
+    if market == "forex":
+        st.session_state.ui_symbol = config.FOREX_SYMBOLS[0]
+        st.session_state.ui_exchange = config.FOREX_EXCHANGES[0]
+        st.session_state.ui_primary_exchange = ""
+        st.session_state.ui_sec_type = "FOREX"
+    else:
+        st.session_state.ui_symbol = config.STOCK_SYMBOLS_LIST[0]
+        st.session_state.ui_exchange = config.STOCKS_EXCHANGES[0]
+        st.session_state.ui_primary_exchange = (
+            config.STOCKS_PRIMARY_EXCHANGES[0] if config.STOCKS_PRIMARY_EXCHANGES else ""
+        )
+        st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
+    st.session_state.ui_what_to_show = "TRADES"
+
 with st.sidebar:
     st.title("Configuración")
     with st.expander("1. Instrumento y Rango", expanded=True):
-        st.selectbox("Símbolo", options=config.STOCK_SYMBOLS_LIST, key="ui_symbol")
+        # MARKET-AWARE UI
+        market_options = ["stocks", "forex"]
+        if st.session_state.ui_market not in market_options:
+            st.session_state.ui_market = "stocks"
+        st.selectbox("Mercado", options=market_options, key="ui_market", on_change=handle_market_change)
+
+        if st.session_state.ui_market == "forex":
+            symbol_options = config.FOREX_SYMBOLS
+            exchange_options = config.FOREX_EXCHANGES
+            if st.session_state.ui_symbol not in symbol_options:
+                st.session_state.ui_symbol = symbol_options[0]
+            if st.session_state.ui_exchange not in exchange_options:
+                st.session_state.ui_exchange = exchange_options[0]
+            st.selectbox("Símbolo", options=symbol_options, key="ui_symbol")
+            st.selectbox("Exchange", options=exchange_options, key="ui_exchange")
+            st.session_state.ui_primary_exchange = ""
+            st.text_input("Primary Exch.", value="No aplica en Forex", disabled=True)
+        else:
+            symbol_options = config.STOCK_SYMBOLS_LIST
+            exchange_options = config.STOCKS_EXCHANGES
+            if st.session_state.ui_symbol not in symbol_options:
+                st.session_state.ui_symbol = symbol_options[0]
+            if st.session_state.ui_exchange not in exchange_options:
+                st.session_state.ui_exchange = exchange_options[0]
+            st.selectbox("Símbolo", options=symbol_options, key="ui_symbol")
+            st.selectbox("Exchange", options=exchange_options, key="ui_exchange")
+            primary_exchange_options = [""] + config.STOCKS_PRIMARY_EXCHANGES
+            if st.session_state.ui_primary_exchange not in primary_exchange_options:
+                st.session_state.ui_primary_exchange = primary_exchange_options[0]
+            st.selectbox("Primary Exch.", options=primary_exchange_options, key="ui_primary_exchange", help="Necesario para desambiguar acciones en SMART.")
+
         st.selectbox("Tipo de Activo", options=['STK', 'FUT', 'IND', 'FOREX', 'CFD', 'CRYPTO'], key="ui_sec_type")
-        st.text_input("Exchange", key="ui_exchange")
         st.text_input("Moneda", key="ui_currency")
-        primary_exchange_options = ['', 'NASDAQ', 'NYSE', 'ARCA', 'AMEX', 'ISLAND', 'BATS', 'IEX']
-        st.selectbox("Primary Exch.", options=primary_exchange_options, key="ui_primary_exchange", help="Necesario para desambiguar acciones en SMART.")
         st.date_input("Inicio Descarga", key="ui_download_start")
         st.date_input("Fin Descarga", key="ui_download_end")
         st.toggle("Usar solo RTH", key="ui_use_rth")
+        st.session_state.ui_what_to_show = st.session_state.get("ui_what_to_show", "TRADES")
         st.selectbox("Fuente de Datos Velas", options=['TRADES', 'MIDPOINT', 'BID', 'ASK'], key="ui_what_to_show")
         st.toggle("Usar Caché de Datos", key="ui_use_cache")
 
