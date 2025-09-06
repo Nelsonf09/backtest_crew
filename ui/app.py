@@ -470,8 +470,9 @@ with st.sidebar:
                 st.session_state.ui_exchange = exchange_options[0]
             st.selectbox("Símbolo", options=symbol_options, key="ui_symbol")
             st.selectbox("Exchange", options=exchange_options, key="ui_exchange")
+            st.caption("Forex usa IDEALPRO y no requiere Primary Exchange.")
             st.session_state.ui_primary_exchange = ""
-            st.text_input("Primary Exch.", value="No aplica en Forex", disabled=True)
+            st.text_input("Primary Exch.", value="N/A", disabled=True)
         else:
             symbol_options = config.STOCK_SYMBOLS_LIST
             exchange_options = config.STOCKS_EXCHANGES
@@ -492,7 +493,12 @@ with st.sidebar:
         st.date_input("Fin Descarga", key="ui_download_end")
         st.toggle("Usar solo RTH", key="ui_use_rth")
         st.session_state.ui_what_to_show = st.session_state.get("ui_what_to_show", "TRADES")
-        st.selectbox("Fuente de Datos Velas", options=['TRADES', 'MIDPOINT', 'BID', 'ASK'], key="ui_what_to_show")
+        st.selectbox(
+            "Fuente de Datos Velas",
+            options=['TRADES', 'MIDPOINT', 'BID', 'ASK'],
+            key="ui_what_to_show",
+            help="En Forex se usará MIDPOINT internamente, aunque aquí veas TRADES.",
+        )
         st.toggle("Usar Caché de Datos", key="ui_use_cache")
 
     with st.expander("2. Estrategia y Ejecución", expanded=True):
