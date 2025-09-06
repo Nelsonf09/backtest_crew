@@ -99,6 +99,9 @@ class DataManager:
         if not self.connection_fsm.is_in_state(ConnectionState.CONNECTED):
             logger.error("No se puede hacer fetch de datos, no hay conexión a IB.")
             return pd.DataFrame()
+        if getattr(contract, 'secType', '').upper() == 'CASH':
+            what_to_show = 'MIDPOINT'
+            rth = False
 
         logger.info(f"Solicitando datos IB: Cont={contract.symbol}, End='{end_datetime_str}', Dur='{duration_str}', TF='{timeframe}'")
         try:
@@ -173,15 +176,21 @@ class DataManager:
         try:
             if filename.exists():
                 df = pd.read_parquet(filename)
-                if df.empty: return df 
+                if df.empty: return df
                 if not isinstance(df.index, pd.DatetimeIndex): df.index = pd.to_datetime(df.index)
                 if df.index.tz is None: df.index = df.index.tz_localize('UTC')
                 elif str(df.index.tz).upper() != 'UTC': df.index = df.index.tz_convert('UTC')
                 return df
             return None
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Error cargando o procesando caché {filename}: {e}", exc_info=True)
-            return None 
+            return None
+
+    def _normalize_fetch_params(self, market: str, rth: bool, what_to_show: str) -> tuple[bool, str]:
+        market = (market or "stocks").lower()
+        if market == "forex":
+            return False, "MIDPOINT"
+        return rth, what_to_show
 
     def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str,
                         timeframe_daily='1 day', timeframe_intra='5 mins',
@@ -194,11 +203,9 @@ class DataManager:
         if market == "forex":
             sec_type = "FOREX"
             exchange = "IDEALPRO"
-            what_to_show = "MIDPOINT"
-            rth_prev_day = False
-        else:
-            what_to_show = "TRADES"
-            rth_prev_day = True
+
+        rth_prev_day, what_to_show = self._normalize_fetch_params(market, True, "TRADES")
+        rth_premarket, what_to_show = self._normalize_fetch_params(market, False, what_to_show)
 
         prev_business_day = (pd.Timestamp(target_date) - pd.tseries.offsets.BDay(1)).date()
         prev_day_str = prev_business_day.strftime('%Y%m%d')
@@ -218,7 +225,7 @@ class DataManager:
                 if use_cache and not df_previous_day.empty: self._save_data_to_cache(df_previous_day.copy(), cache_filename_pd)
         
         target_date_str = target_date.strftime('%Y%m%d')
-        cache_filename_pm = self._get_cache_filename("PM", symbol, timeframe_intra, target_date_str, target_date_str, sec_type, exchange, rth=False)
+        cache_filename_pm = self._get_cache_filename("PM", symbol, timeframe_intra, target_date_str, target_date_str, sec_type, exchange, rth=rth_premarket)
         
         if use_cache: df_premarket = self._load_data_from_cache(cache_filename_pm)
 
@@ -230,7 +237,7 @@ class DataManager:
             duration_str_pm = f"{max(120, duration_seconds_pm + 120)} S"
             
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
-            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, False, what_to_show)
+            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, rth_premarket, what_to_show)
             if df_fetched_pm is not None and not df_fetched_pm.empty:
                 start_utc = start_dt_pm_market.astimezone(self.UTC_TZ)
                 end_utc = end_dt_pm_market.astimezone(self.UTC_TZ)
@@ -262,8 +269,9 @@ class DataManager:
         if market == "forex":
             sec_type = "FOREX"
             exchange = "IDEALPRO"
-            if what_to_show.upper() == "TRADES":
-                what_to_show = "MIDPOINT"
+
+        rth, what_to_show = self._normalize_fetch_params(market, rth, what_to_show)
+
         # Política de chunking y pausa según el timeframe para forex
         pause_between_chunks = 0.0
         if market == "forex":
