@@ -204,8 +204,10 @@ class DataManager:
             sec_type = "FOREX"
             exchange = "IDEALPRO"
 
-        rth_prev_day, what_to_show = self._normalize_fetch_params(market, True, "TRADES")
-        rth_premarket, what_to_show = self._normalize_fetch_params(market, False, what_to_show)
+        rth_prev_day, what_to_show = self._normalize_fetch_params(
+            market, True, self.config.WHAT_TO_SHOW
+        )
+        rth_premarket, _ = self._normalize_fetch_params(market, False, what_to_show)
 
         prev_business_day = (pd.Timestamp(target_date) - pd.tseries.offsets.BDay(1)).date()
         prev_day_str = prev_business_day.strftime('%Y%m%d')
