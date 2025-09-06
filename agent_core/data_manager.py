@@ -184,10 +184,11 @@ class DataManager:
             logger.error(f"Error cargando o procesando caché {filename}: {e}", exc_info=True)
             return None 
 
-    def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str, 
-                        timeframe_daily='1 day', timeframe_intra='5 mins', 
-                        premarket_start_hour=4, market_open_hour=9, market_open_minute=30, 
-                        use_cache=True, **contract_kwargs):
+    def get_levels_data(self, target_date: datetime.date, symbol: str, sec_type: str, exchange: str, currency: str,
+                        timeframe_daily='1 day', timeframe_intra='5 mins',
+                        premarket_start_hour=4, market_open_hour=9, market_open_minute=30,
+                        use_cache=True, what_to_show: str = config.WHAT_TO_SHOW,
+                        **contract_kwargs):
         df_previous_day = pd.DataFrame()
         df_premarket = pd.DataFrame()
         
@@ -201,7 +202,7 @@ class DataManager:
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
             end_dt_prev_day_market = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time(23, 59, 59)))
             end_dt_prev_day_utc_str = end_dt_prev_day_market.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
-            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, True, 'TRADES')
+            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, True, what_to_show)
             if df_fetched_pd is not None and not df_fetched_pd.empty:
                 start_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.min)).astimezone(self.UTC_TZ)
                 end_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.max)).astimezone(self.UTC_TZ)
@@ -221,7 +222,7 @@ class DataManager:
             duration_str_pm = f"{max(120, duration_seconds_pm + 120)} S"
             
             contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
-            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, False, 'TRADES')
+            df_fetched_pm = self._fetch_data_core(contract_obj, end_dt_pm_utc_req_str, duration_str_pm, timeframe_intra, False, what_to_show)
             if df_fetched_pm is not None and not df_fetched_pm.empty:
                 start_utc = start_dt_pm_market.astimezone(self.UTC_TZ)
                 end_utc = end_dt_pm_market.astimezone(self.UTC_TZ)

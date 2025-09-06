@@ -111,10 +111,11 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
     for date in unique_dates:
         date_obj = date.date()
         df_prev, df_pm = dm.get_levels_data(
-            target_date=date_obj, symbol=st.session_state.ui_symbol, 
-            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
-            primary_exchange=st.session_state.ui_primary_exchange
+            target_date=date_obj, symbol=st.session_state.ui_symbol,
+            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+            primary_exchange=st.session_state.ui_primary_exchange,
+            what_to_show=st.session_state.ui_what_to_show
         )
         levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         df_day = df_enriched[df_enriched.index.date == date_obj]
@@ -316,10 +317,11 @@ def process_and_prepare_daily_data_visual():
             return
         try:
             df_prev, df_pm = dm.get_levels_data(
-                target_date=date_to_replay, symbol=st.session_state.ui_symbol, 
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
-                primary_exchange=st.session_state.ui_primary_exchange
+                target_date=date_to_replay, symbol=st.session_state.ui_symbol,
+                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+                primary_exchange=st.session_state.ui_primary_exchange,
+                what_to_show=st.session_state.ui_what_to_show
             )
             st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         finally:

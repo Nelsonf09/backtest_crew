@@ -38,7 +38,7 @@ EMA_FILTER_TIMEFRAMES = [
 # --- FIN DE LA MODIFICACIÓN ---
 DEFAULT_DATA_DURATION = '5 D'
 USE_RTH = False
-WHAT_TO_SHOW = 'TRADES'
+WHAT_TO_SHOW = 'MIDPOINT'
 
 # --- Configuración de Niveles y Estrategia ---
 LEVEL_RANGES = {
