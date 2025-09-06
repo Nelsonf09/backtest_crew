@@ -232,12 +232,12 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
     with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
         df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
 
-        df_filter_raw = pd.DataFrame()
-        if filter_tf != exec_tf:
-            df_filter_raw = dm.get_main_data(timeframe=filter_tf, **common_params)
-        else:
-            # Si son el mismo, evitamos una segunda descarga innecesaria
-            df_filter_raw = df_exec_raw.copy()
+        # Evitamos duplicar descargas cuando ambos timeframes coinciden
+        df_filter_raw = (
+            dm.get_main_data(timeframe=filter_tf, **common_params)
+            if filter_tf != exec_tf
+            else df_exec_raw.copy()
+        )
 
     return df_exec_raw, df_filter_raw
 
