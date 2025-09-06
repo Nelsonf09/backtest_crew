@@ -39,6 +39,9 @@ def run_fast_backtest_exact(
     initial_capital: float = 1000.0,
     commission_per_side: float = 0.85,
     leverage: float = 5.0,
+    # --- Nuevo parámetro para soportar distintos mercados ---
+    market: str = "stocks",
+    symbol: str = "",
     # --- Reglas de sesión del motor rápido (se mantienen) ---
     stop_after_first_win: bool = True,
     # --- INICIO DE LA MODIFICACIÓN ---
@@ -56,9 +59,25 @@ def run_fast_backtest_exact(
     if df_day_with_context is None or df_day_with_context.empty or day_start_index >= len(df_day_with_context):
         return np.zeros((0, 8), dtype=np.float64), np.zeros((0, 2), dtype=np.float64)
 
+    pip_size = None
+    if market.lower() == "forex":
+        pip_size = 0.01 if symbol.upper().endswith("JPY") else 0.0001
+
+    def _quant(price: float) -> float:
+        if pip_size is None or not np.isfinite(price):
+            return float(price)
+        return float(np.round(price / pip_size) * pip_size)
+
     df = df_day_with_context.copy()
     for c in ("open", "high", "low", "close"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+        if pip_size is not None:
+            df[c] = np.round(df[c] / pip_size) * pip_size
+
+    if pip_size is not None:
+        day_levels = {k: _quant(v) for k, v in day_levels.items()}
+    else:
+        day_levels = dict(day_levels)
 
     # === Instancia de estrategia paso-a-paso con los MISMOS parámetros ===
     strat = OpeningBreakRetestStrategy(
@@ -108,7 +127,7 @@ def run_fast_backtest_exact(
                 elif row["close"] >= current_sl: is_closed, exit_price, exit_reason = True, float(current_sl), 2
 
             if not is_closed and _force_close_time(ts):
-                is_closed, exit_price, exit_reason = True, float(row["close"]), 3
+                is_closed, exit_price, exit_reason = True, _quant(float(row["close"])), 3
 
             if is_closed:
                 pnl_gross = (exit_price - entry_price) * position_size if direction == 1 else (entry_price - exit_price) * position_size
@@ -156,10 +175,10 @@ def run_fast_backtest_exact(
             if isinstance(signal, dict):
                 sig_type = str(signal.get("type", "HOLD")).upper()
                 if sig_type in ("BUY", "SELL"):
-                    entry_price = float(row["close"])
+                    entry_price = _quant(float(row["close"]))
                     direction = 1 if sig_type == "BUY" else -1
-                    sl_price = float(signal.get("sl_price", np.nan))
-                    tp_price = float(signal.get("tp1_price", np.nan))
+                    sl_price = _quant(float(signal.get("sl_price", np.nan)))
+                    tp_price = _quant(float(signal.get("tp1_price", np.nan)))
 
                     if not (np.isfinite(sl_price) and np.isfinite(tp_price) and entry_price > 0):
                         direction = 0
