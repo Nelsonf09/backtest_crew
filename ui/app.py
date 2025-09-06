@@ -476,7 +476,6 @@ def handle_market_change():
             config.STOCKS_PRIMARY_EXCHANGES[0] if config.STOCKS_PRIMARY_EXCHANGES else ""
         )
         st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
-    st.session_state.ui_what_to_show = "TRADES"
 
     exec_options = get_exec_timeframe_options(market)
     if st.session_state.ui_exec_timeframe not in exec_options:
@@ -529,7 +528,9 @@ with st.sidebar:
         st.date_input("Inicio Descarga", key="ui_download_start")
         st.date_input("Fin Descarga", key="ui_download_end")
         st.toggle("Usar solo RTH", key="ui_use_rth")
-        st.session_state.ui_what_to_show = st.session_state.get("ui_what_to_show", "TRADES")
+        st.session_state.ui_what_to_show = st.session_state.get(
+            "ui_what_to_show", config.WHAT_TO_SHOW
+        )
         st.selectbox(
             "Fuente de Datos Velas",
             options=['TRADES', 'MIDPOINT', 'BID', 'ASK'],
