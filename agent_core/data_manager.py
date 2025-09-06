@@ -259,6 +259,31 @@ class DataManager:
         pml = pd.to_numeric(df_premarket['low'], errors='coerce').min()
         return {'PMH': pmh if pd.notna(pmh) else None, 'PML': pml if pd.notna(pml) else None}
 
+    def _fetch_chunk_with_retry(self, contract, end_dt_utc_req_chunk: str, duration_req_chunk: str,
+                                timeframe: str, rth: bool, what_to_show: str, market: str) -> pd.DataFrame:
+        """Obtiene datos para un fragmento con reintentos y fallback BID_ASK para forex."""
+        max_retries = 3
+        retry_pause = 1
+        df_chunk = pd.DataFrame()
+
+        for _ in range(max_retries):
+            df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk,
+                                             timeframe, rth, what_to_show)
+            if df_chunk is not None and not df_chunk.empty:
+                return df_chunk
+            time.sleep(retry_pause)
+
+        if market == "forex" and what_to_show == "MIDPOINT":
+            logger.warning("MIDPOINT vacío tras reintentos, probando BID_ASK.")
+            for _ in range(max_retries):
+                df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk,
+                                                 timeframe, rth, "BID_ASK")
+                if df_chunk is not None and not df_chunk.empty:
+                    return df_chunk
+                time.sleep(retry_pause)
+
+        return df_chunk
+
     def get_main_data(self, symbol: str, timeframe: str, sec_type: str, exchange: str, currency: str, rth: bool, what_to_show: str,
                       download_start_date: datetime.date, download_end_date: datetime.date,
                       use_cache=True, market: str = "stocks", **kwargs) -> pd.DataFrame:
@@ -327,7 +352,8 @@ class DataManager:
                 end_dt_market_chunk = self.MARKET_TZ.localize(datetime.datetime.combine(current_end, datetime.time(23, 59, 59)))
                 end_dt_utc_req_chunk = end_dt_market_chunk.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
 
-                df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk, timeframe, rth, what_to_show)
+                df_chunk = self._fetch_chunk_with_retry(contract, end_dt_utc_req_chunk, duration_req_chunk,
+                                                        timeframe, rth, what_to_show, market)
 
                 if df_chunk is not None and not df_chunk.empty and use_cache:
                     # Guardar el fragmento recién descargado en su propio archivo de caché
