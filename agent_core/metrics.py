@@ -1,47 +1,17 @@
 # core/metrics.py
 import pandas as pd
-import numpy as np
 import logging
-from decimal import Decimal
 
-from agent_core.performance import drawdown_curve_from_equity
+from agent_core.performance import max_drawdown_pct
 
 # Logger específico
 logger = logging.getLogger(__name__)
 
 
 def compute_max_drawdown(equity: pd.Series) -> float:
-    """Calcula el Max Drawdown (peak→trough) en porcentaje positivo.
+    """Calcula el Max Drawdown (peak→trough) en porcentaje positivo."""
 
-    Parameters
-    ----------
-    equity : pd.Series
-        Serie de valores de equity para una ejecución.
-
-    Returns
-    -------
-    float
-        Máximo drawdown expresado como porcentaje positivo con dos decimales.
-        Si la serie es None, vacía o constante, devuelve 0.0.
-    """
-
-    if equity is None or equity.empty:
-        return 0.0
-
-    # Si todos los valores son iguales no hay drawdown
-    if equity.nunique() <= 1:
-        return 0.0
-
-    roll_max = equity.cummax()
-    # Evitar divisiones por cero reemplazando picos en cero con NaN
-    with np.errstate(divide="ignore", invalid="ignore"):
-        dd = (equity - roll_max) / roll_max.replace(0, np.nan)
-
-    max_dd = dd.min()
-    if pd.isna(max_dd):
-        return 0.0
-
-    return round(abs(max_dd) * 100, 2)
+    return round(max_drawdown_pct(equity), 2) if equity is not None and not equity.empty else 0.0
 
 def calculate_performance_metrics(trades: list, initial_capital: float,
                                   equity_history: list | None = None) -> dict:
@@ -84,8 +54,7 @@ def calculate_performance_metrics(trades: list, initial_capital: float,
         try:
             equity_df = pd.DataFrame(equity_history, columns=["time", "equity"])
             equity_df["equity"] = pd.to_numeric(equity_df["equity"])
-            dd = drawdown_curve_from_equity(equity_df["equity"])
-            metrics["Max Drawdown (%)"] = dd.attrs.get('max_dd_pct', float(dd['dd_pct'].min()))
+            metrics["Max Drawdown (%)"] = max_drawdown_pct(equity_df["equity"])
         except Exception as e_dd:
             logger.error(f"Error calculando Max Drawdown: {e_dd}", exc_info=True)
             metrics["Max Drawdown (%)"] = 0.0  # Fallback a 0.0 en caso de error
@@ -97,5 +66,4 @@ if __name__ == "__main__":
     # Pequeña prueba manual del cálculo de Max Drawdown
     equity_example = pd.Series([100, 120, 80, 90, 70, 150])
     print("Equity:", equity_example.tolist())
-    dd_example = drawdown_curve_from_equity(equity_example)
-    print("Max Drawdown (%):", dd_example.attrs.get('max_dd_pct'))
+    print("Max Drawdown (%):", max_drawdown_pct(equity_example))

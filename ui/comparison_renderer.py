@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from agent_core.metrics import calculate_performance_metrics
-from agent_core.performance import drawdown_curve_from_equity
+from agent_core.performance import drawdown_curve_pct, max_drawdown_pct
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -33,9 +33,8 @@ def render_comparison_dashboard():
         )
         eq_dd = results['equity'].copy()
         eq_dd['time'] = pd.to_datetime(eq_dd['time'], unit='s', utc=True)
-        eq_dd = eq_dd.set_index('time')['equity']
-        dd = drawdown_curve_from_equity(eq_dd)
-        max_dd_pct = dd.attrs.get('max_dd_pct', float(dd['dd_pct'].min()))
+        eq_dd = eq_dd.set_index('time')['equity'].resample('D').last().ffill()
+        max_dd_pct = max_drawdown_pct(eq_dd)
         metrics_data.append({
             'Configuración': name,
             'Ganancia Neta Total ($)': metrics.get('Ganancia Neta Total ($)', 0),
@@ -51,7 +50,7 @@ def render_comparison_dashboard():
         'Ganancia Neta Total ($)': "${:,.2f}",
         'Ganancia Neta Total (%)': "{:.2f}%",
         'Win Rate (%)': "{:.2f}%",
-        'Max Drawdown (%)': "{:.2f}%"
+        'Max Drawdown (%)': lambda x: f"{-x:.2f}%"
     }))
 
     # --- 2. Gráfico de Curva de Equity Combinada ---
@@ -96,8 +95,8 @@ def render_comparison_dashboard():
             continue
         eq_series = eq.copy()
         eq_series['time'] = pd.to_datetime(eq_series['time'], unit='s', utc=True)
-        eq_series = eq_series.set_index('time')['equity']
-        dd_df = drawdown_curve_from_equity(eq_series)
+        eq_series = eq_series.set_index('time')['equity'].resample('D').last().ffill()
+        dd_df = drawdown_curve_pct(eq_series)
         fig_ddc.add_trace(go.Scatter(x=dd_df.index, y=dd_df['dd_pct'], mode="lines", name=name))
     fig_ddc.update_layout(xaxis_title="Fecha", yaxis_title="Drawdown (%)", hovermode="x unified")
     st.plotly_chart(fig_ddc, use_container_width=True, key="comp_plot_dd")
