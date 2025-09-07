@@ -10,8 +10,11 @@ import calendar
 import plotly.graph_objects as go
 import plotly.express as px
 
-from agent_core.metrics import calculate_performance_metrics
-from agent_core.performance import drawdown_curve_pct, max_drawdown_pct
+from agent_core.metrics import (
+    calculate_performance_metrics,
+    compute_drawdown_series,
+    compute_max_drawdown_pct,
+)
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
     """Genera el HTML para el calendario de rendimiento mensual."""
@@ -111,7 +114,12 @@ def render_global_results(filter_name: str = ""):
     
     trades_df['entry_time_dt'] = pd.to_datetime(trades_df['entry_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz)
 
-    metrics = calculate_performance_metrics(trades_df.to_dict('records'), st.session_state.ui_initial_capital, equity_df.values.tolist())
+    metrics = calculate_performance_metrics(
+        trades_df.to_dict('records'),
+        st.session_state.ui_initial_capital,
+        equity_df.values.tolist(),
+    )
+    st.session_state.metrics = metrics
 
     st.markdown("---")
     
@@ -167,27 +175,43 @@ def render_global_results(filter_name: str = ""):
     delta_color = "positive" if ganancia_neta_pct >= 0 else "negative"
     
     with col1:
-        st.markdown(create_metric_html(
-            "Ganancia Neta Total",
-            f"${metrics.get('Ganancia Neta Total ($)', 0):,.2f}",
-            f"{ganancia_neta_pct:.2f}%",
-            delta_color
-        ), unsafe_allow_html=True)
+        st.markdown(
+            create_metric_html(
+                "Ganancia Neta Total",
+                f"${metrics.get('Ganancia Neta Total ($)', 0):,.2f}",
+                f"{ganancia_neta_pct:.2f}%",
+                delta_color,
+            ),
+            unsafe_allow_html=True,
+            key=f"{filter_name}_metric_net_profit",
+        )
     with col2:
-        st.markdown(create_metric_html(
-            "Trades Totales",
-            f"{metrics.get('Total Trades', 0)}"
-        ), unsafe_allow_html=True)
+        st.markdown(
+            create_metric_html(
+                "Trades Totales",
+                f"{metrics.get('Total Trades', 0)}",
+            ),
+            unsafe_allow_html=True,
+            key=f"{filter_name}_metric_total_trades",
+        )
     with col3:
-        st.markdown(create_metric_html(
-            "Win Rate",
-            f"{metrics.get('Win Rate (%)', 0):.2f}%"
-        ), unsafe_allow_html=True)
+        st.markdown(
+            create_metric_html(
+                "Win Rate",
+                f"{metrics.get('Win Rate (%)', 0):.2f}%",
+            ),
+            unsafe_allow_html=True,
+            key=f"{filter_name}_metric_win_rate",
+        )
     with col4:
-        st.markdown(create_metric_html(
-            "Profit Factor",
-            f"{metrics.get('Profit Factor', 'N/A')}"
-        ), unsafe_allow_html=True)
+        st.markdown(
+            create_metric_html(
+                "Profit Factor",
+                f"{metrics.get('Profit Factor', 'N/A')}",
+            ),
+            unsafe_allow_html=True,
+            key=f"{filter_name}_metric_profit_factor",
+        )
     
     st.markdown("---")
 
@@ -255,16 +279,34 @@ def render_global_results(filter_name: str = ""):
             st.plotly_chart(
                 fig,
                 use_container_width=True,
-                key=f"{filter_name}_equity",
+                key=f"{filter_name}_equity_chart",
             )
 
-            dd_curve = drawdown_curve_pct(equity_df_chart['equity'])
-            mdd = max_drawdown_pct(equity_df_chart['equity'])
+            equity_series = equity_df_chart["equity"]
+            dd_curve = compute_drawdown_series(equity_series).mul(100.0)
+            st.session_state.drawdown_series = dd_curve
+            mdd = compute_max_drawdown_pct(equity_series)
             fig_dd = go.Figure()
-            fig_dd.add_trace(go.Scatter(x=dd_curve.index, y=dd_curve, mode="lines", name="Drawdown (%)", connectgaps=False))
-            fig_dd.update_layout(title="Curva de Drawdown (%)", xaxis_title="Fecha", yaxis_title="Drawdown (%)", hovermode="x unified")
-            _k = f"{filter_name}_plot_dd" if filter_name else "default_plot_dd"
-            st.plotly_chart(fig_dd, use_container_width=True, key=_k)
+            fig_dd.add_trace(
+                go.Scatter(
+                    x=dd_curve.index,
+                    y=dd_curve,
+                    mode="lines",
+                    name="Drawdown (%)",
+                    connectgaps=False,
+                )
+            )
+            fig_dd.update_layout(
+                title="Curva de Drawdown (%)",
+                xaxis_title="Fecha",
+                yaxis_title="Drawdown (%)",
+                hovermode="x unified",
+            )
+            st.plotly_chart(
+                fig_dd,
+                use_container_width=True,
+                key=f"{filter_name}_dd_chart",
+            )
             max_dd_pct = mdd
             metrics["Max Drawdown (%)"] = max_dd_pct
 
@@ -279,17 +321,20 @@ def render_global_results(filter_name: str = ""):
                 st.metric(
                     "Trade Ganador Promedio",
                     f"${avg_win:,.2f}",
+                    key=f"{filter_name}_avg_win",
                 )
             with col2:
                 st.metric(
                     "Trade Perdedor Promedio",
                     f"${avg_loss:,.2f}",
+                    key=f"{filter_name}_avg_loss",
                 )
             with col3:
                 # Mostrar Max Drawdown como porcentaje positivo
                 st.metric(
                     "Max Drawdown",
                     f"{max_dd_pct:.2f}%",
+                    key=f"{filter_name}_max_dd",
                 )
 
     st.markdown("---")

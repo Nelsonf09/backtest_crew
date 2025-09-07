@@ -5,8 +5,11 @@ Módulo para renderizar el dashboard de comparación de resultados de backtests.
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from agent_core.metrics import calculate_performance_metrics
-from agent_core.performance import drawdown_curve_pct, max_drawdown_pct
+from agent_core.metrics import (
+    calculate_performance_metrics,
+    compute_drawdown_series,
+    compute_max_drawdown_pct,
+)
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -35,9 +38,8 @@ def render_comparison_dashboard():
         equity_df = results['equity'].copy()
         equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
         eq_series = equity_df.set_index('time')['equity']
-        dd_curve = drawdown_curve_pct(eq_series)
-        mdd = max_drawdown_pct(eq_series)
-        # Guardar el MDD como porcentaje positivo
+        dd_curve = compute_drawdown_series(eq_series).mul(100.0)
+        mdd = compute_max_drawdown_pct(eq_series)
         metrics['Max Drawdown (%)'] = mdd
         dd_curves[name] = dd_curve
         metrics_data.append({
@@ -51,6 +53,7 @@ def render_comparison_dashboard():
         })
 
     df_metrics = pd.DataFrame(metrics_data).set_index('Configuración')
+    st.session_state.metrics = df_metrics
     # Mostrar las métricas en formato porcentual positivo
     st.dataframe(df_metrics.style.format({
         'Ganancia Neta Total ($)': "${:,.2f}",
@@ -91,24 +94,33 @@ def render_comparison_dashboard():
         xaxis_title="Fecha",
         legend_title_text=comparison_type
     )
-    st.plotly_chart(fig, use_container_width=True, key="comp_plot_eq")
+    st.plotly_chart(fig, use_container_width=True, key="comparison_equity_chart")
 
     st.subheader("Curvas de Drawdown Comparadas")
-    fig_ddc = go.Figure()
-    for name, dd_curve in dd_curves.items():
-        if dd_curve is None or dd_curve.empty:
-            continue
-        fig_ddc.add_trace(
-            go.Scatter(
-                x=dd_curve.index,
-                y=dd_curve,
-                mode="lines",
-                name=name,
-                connectgaps=False,
+    if dd_curves:
+        dd_df = pd.concat(dd_curves.values(), axis=1, keys=dd_curves.keys())
+        dd_df.sort_index(inplace=True)
+        dd_df = dd_df.ffill()
+        st.session_state.drawdown_series = dd_df
+        fig_ddc = go.Figure()
+        for name in dd_df.columns:
+            fig_ddc.add_trace(
+                go.Scatter(
+                    x=dd_df.index,
+                    y=dd_df[name],
+                    mode="lines",
+                    name=name,
+                    connectgaps=False,
+                )
             )
+        fig_ddc.update_layout(
+            xaxis_title="Fecha",
+            yaxis_title="Drawdown (%)",
+            hovermode="x unified",
         )
-    fig_ddc.update_layout(xaxis_title="Fecha", yaxis_title="Drawdown (%)", hovermode="x unified")
-    st.plotly_chart(fig_ddc, use_container_width=True, key="comp_plot_dd")
+        st.plotly_chart(
+            fig_ddc, use_container_width=True, key="comparison_dd_chart"
+        )
 
     # --- 3. Vistas Detalladas en Pestañas ---
     st.subheader("Análisis Detallado por Configuración")
