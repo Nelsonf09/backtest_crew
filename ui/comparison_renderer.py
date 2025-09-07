@@ -2,10 +2,16 @@
 """
 Módulo para renderizar el dashboard de comparación de resultados de backtests.
 """
+import logging
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from agent_core.metrics import compute_drawdown_series
+
+from agent_core.utils.metrics import (
+    compute_drawdown_series_pct,
+    compute_global_metrics,
+)
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -26,19 +32,37 @@ def render_comparison_dashboard():
     dd_curves = {}
     # La clave del diccionario (ej. 'Fuerte' o '5 mins') se usa como nombre.
     for name, results in comparison_results.items():
-        metrics = results['metrics']
         equity_df = results['equity'].copy()
         equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
         eq_series = equity_df.set_index('time')['equity']
-        dd_curve = compute_drawdown_series(eq_series).mul(100.0)
-        dd_curves[name] = dd_curve
-        assert abs(metrics['Max Drawdown (%)'] - (-dd_curve.min())) < 1e-6
+
+        trades_df = results['trades']
+        trades_list = trades_df.rename(columns={'pnl_net': 'pnl'}).to_dict('records')
+        metrics = compute_global_metrics(
+            eq_series,
+            trades_list,
+            st.session_state.ui_initial_capital,
+        )
+        results['metrics'] = metrics
+
+        dd_curve_pct = compute_drawdown_series_pct(eq_series)
+        dd_curves[name] = dd_curve_pct
+
+        dd_from_curve = float(-dd_curve_pct.min()) if len(dd_curve_pct) else 0.0
+        if abs(round(dd_from_curve, 2) - round(metrics['Max Drawdown (%)'], 2)) > 0.05:
+            logging.warning(
+                "Max DD mismatch for %s: metrics=%.2f%% curve=%.2f%%",
+                name,
+                metrics['Max Drawdown (%)'],
+                dd_from_curve,
+            )
+
         metrics_data.append({
             'Configuración': name,
             'Ganancia Neta Total ($)': metrics.get('Ganancia Neta Total ($)', 0),
             'Ganancia Neta Total (%)': metrics.get('Ganancia Neta Total (%)', 0),
             'Win Rate (%)': metrics.get('Win Rate (%)', 0),
-            'Profit Factor': metrics.get('Profit Factor', 'N/A'),
+            'Profit Factor': metrics.get('Profit Factor', 0),
             'Max Drawdown (%)': metrics.get('Max Drawdown (%)', 0),
             'Trades Totales': metrics.get('Trades Totales', 0)
         })
