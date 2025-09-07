@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from agent_core.metrics import calculate_performance_metrics
-from agent_core.performance import drawdown_curve_from_equity
+from agent_core.performance import drawdown_curve_pct, max_drawdown_pct
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -24,6 +24,7 @@ def render_comparison_dashboard():
     st.subheader("Tabla Resumen de Métricas")
     
     metrics_data = []
+    dd_curves = {}
     # La clave del diccionario (ej. 'Fuerte' o '5 mins') se usa como nombre.
     for name, results in comparison_results.items():
         metrics = calculate_performance_metrics(
@@ -31,22 +32,26 @@ def render_comparison_dashboard():
             st.session_state.ui_initial_capital,
             results['equity'].values.tolist()
         )
-        eq_dd = results['equity'].copy()
-        eq_dd['time'] = pd.to_datetime(eq_dd['time'], unit='s', utc=True)
-        eq_dd = eq_dd.set_index('time')['equity']
-        dd = drawdown_curve_from_equity(eq_dd)
-        max_dd_pct = dd.attrs.get('max_dd_pct', float(dd['dd_pct'].min()))
+        equity_df = results['equity'].copy()
+        equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
+        eq_series = equity_df.set_index('time')['equity']
+        dd_curve = drawdown_curve_pct(eq_series)
+        mdd = max_drawdown_pct(eq_series)
+        # Guardar el MDD como porcentaje positivo
+        metrics['Max Drawdown (%)'] = mdd
+        dd_curves[name] = dd_curve
         metrics_data.append({
             'Configuración': name,
             'Ganancia Neta Total ($)': metrics.get('Ganancia Neta Total ($)', 0),
             'Ganancia Neta Total (%)': metrics.get('Ganancia Neta Total (%)', 0),
             'Win Rate (%)': metrics.get('Win Rate (%)', 0),
             'Profit Factor': metrics.get('Profit Factor', 'N/A'),
-            'Max Drawdown (%)': max_dd_pct,
+            'Max Drawdown (%)': metrics.get('Max Drawdown (%)', 0),
             'Trades Totales': metrics.get('Total Trades', 0)
         })
 
     df_metrics = pd.DataFrame(metrics_data).set_index('Configuración')
+    # Mostrar las métricas en formato porcentual positivo
     st.dataframe(df_metrics.style.format({
         'Ganancia Neta Total ($)': "${:,.2f}",
         'Ganancia Neta Total (%)': "{:.2f}%",
@@ -90,15 +95,18 @@ def render_comparison_dashboard():
 
     st.subheader("Curvas de Drawdown Comparadas")
     fig_ddc = go.Figure()
-    for name, payload in comparison_results.items():
-        eq = payload.get('equity')
-        if eq is None or len(eq) == 0:
+    for name, dd_curve in dd_curves.items():
+        if dd_curve is None or dd_curve.empty:
             continue
-        eq_series = eq.copy()
-        eq_series['time'] = pd.to_datetime(eq_series['time'], unit='s', utc=True)
-        eq_series = eq_series.set_index('time')['equity']
-        dd_df = drawdown_curve_from_equity(eq_series)
-        fig_ddc.add_trace(go.Scatter(x=dd_df.index, y=dd_df['dd_pct'], mode="lines", name=name))
+        fig_ddc.add_trace(
+            go.Scatter(
+                x=dd_curve.index,
+                y=dd_curve,
+                mode="lines",
+                name=name,
+                connectgaps=False,
+            )
+        )
     fig_ddc.update_layout(xaxis_title="Fecha", yaxis_title="Drawdown (%)", hovermode="x unified")
     st.plotly_chart(fig_ddc, use_container_width=True, key="comp_plot_dd")
 
