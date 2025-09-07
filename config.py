@@ -50,12 +50,18 @@ DEFAULT_DISPLAY_TZ = 'America/New_York'
 
 # --- Configuración de Timeframe y Rango de Datos ---
 DEFAULT_TIMEFRAME = '1 min'
-# --- INICIO DE LA MODIFICACIÓN ---
-# Lista de timeframes para el filtro EMA, ahora centralizada.
-EMA_FILTER_TIMEFRAMES = [
-    '1 min', '5 mins', '15 mins'
+
+# Opciones para el timeframe del filtro EMA (label/value) y valor por defecto
+EMA_FILTER_TIMEFRAME_OPTIONS = [
+    {"label": "1 min",  "value": "1min"},
+    {"label": "5 mins", "value": "5min"},
+    {"label": "15 mins", "value": "15min"},
+    {"label": "30 mins", "value": "30min"},
+    {"label": "Comparar Timeframes", "value": "compare"},
 ]
-# --- FIN DE LA MODIFICACIÓN ---
+
+DEFAULT_EMA_FILTER_TIMEFRAME = "5min"
+
 DEFAULT_DATA_DURATION = '5 D'
 USE_RTH = False
 WHAT_TO_SHOW = 'TRADES'
