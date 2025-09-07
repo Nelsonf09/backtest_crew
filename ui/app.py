@@ -18,6 +18,7 @@ import datetime
 from decimal import Decimal
 import sys
 import pytz
+import re
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -37,6 +38,22 @@ from shared.fsm import FSM, AppState
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
 
 st.set_page_config(layout="wide", page_title="Backtester Híbrido (IA)", initial_sidebar_state="expanded")
+
+
+def ema_tf_value_to_label(value: str) -> str:
+    """Devuelve la etiqueta asociada a un valor de timeframe del filtro EMA."""
+    return next(
+        (opt["label"] for opt in config.EMA_FILTER_TIMEFRAME_OPTIONS if opt["value"] == value),
+        value,
+    )
+
+
+def ema_tf_label_to_value(label: str) -> str:
+    """Devuelve el valor asociado a una etiqueta de timeframe del filtro EMA."""
+    return next(
+        (opt["value"] for opt in config.EMA_FILTER_TIMEFRAME_OPTIONS if opt["label"] == label),
+        label,
+    )
 
 def initialize_session_state():
     if 'app_fsm' in st.session_state: return
@@ -64,11 +81,15 @@ def initialize_session_state():
     st.session_state.ui_symbol = config.DEFAULT_SYMBOL
     st.session_state.ui_timeframe = '1 min'
     st.session_state.ui_exec_timeframe = '1 min'
-    st.session_state.ui_filter_timeframe = (
-        '5 mins'
-        if '5 mins' in config.EMA_FILTER_TIMEFRAMES
-        else (config.EMA_FILTER_TIMEFRAMES[0] if config.EMA_FILTER_TIMEFRAMES else '1 min')
+    st.session_state.ema_filter_timeframe = getattr(
+        config,
+        "DEFAULT_EMA_FILTER_TIMEFRAME",
+        next(
+            (opt["value"] for opt in getattr(config, "EMA_FILTER_TIMEFRAME_OPTIONS", []) if opt.get("value")),
+            "5min",
+        ),
     )
+    st.session_state.ema_tf_select = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
     st.session_state.ui_download_start = _start
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
@@ -263,7 +284,7 @@ def process_global_backtesting():
 
     try:
         is_filter_comparison = st.session_state.ui_ema_filter == "Comparar Filtros"
-        is_timeframe_comparison = st.session_state.ui_filter_timeframe == "Comparar Timeframes"
+        is_timeframe_comparison = st.session_state.ema_filter_timeframe == "compare"
 
         if is_filter_comparison and is_timeframe_comparison:
             st.error("No se pueden ejecutar ambas comparaciones a la vez. Por favor, elija solo una.")
@@ -278,19 +299,24 @@ def process_global_backtesting():
             progress_bar = st.progress(0, text="Iniciando comparación de timeframes...")
             fixed_ema_filter_mode = st.session_state.ui_ema_filter
 
-            for i, tf in enumerate(timeframes_to_compare):
-                text = f"Ejecutando para timeframe: {tf} (Filtro: {fixed_ema_filter_mode})"
+            for i, tf_val in enumerate(timeframes_to_compare):
+                tf_label = ema_tf_value_to_label(tf_val)
+                text = f"Ejecutando para timeframe: {tf_label} (Filtro: {fixed_ema_filter_mode})"
                 progress_bar.progress((i + 1) / len(timeframes_to_compare), text=text)
 
-                df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, tf)
+                df_exec_raw, df_filter_raw = load_data_for_backtest(
+                    dm,
+                    st.session_state.ui_exec_timeframe,
+                    tf_label,
+                )
                 if df_exec_raw.empty:
-                    logger.warning(f"No hay datos de ejecución, saltando timeframe {tf}.")
+                    logger.warning(f"No hay datos de ejecución, saltando timeframe {tf_label}.")
                     continue
                 df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
                 df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
-                
+
                 trades, equity = run_single_backtest_iteration(df_enriched_local, tz_handler, fixed_ema_filter_mode)
-                st.session_state.comparison_results[tf] = {'trades': trades, 'equity': equity}
+                st.session_state.comparison_results[tf_label] = {'trades': trades, 'equity': equity}
 
             progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
@@ -301,7 +327,8 @@ def process_global_backtesting():
             st.session_state.comparison_results = {}
             filter_modes_to_compare = ["Desactivado", "Moderado", "Fuerte"]
             progress_bar = st.progress(0, text="Iniciando comparación de filtros EMA...")
-            fixed_filter_tf = st.session_state.ui_filter_timeframe
+            fixed_filter_tf_val = st.session_state.ema_filter_timeframe
+            fixed_filter_tf = ema_tf_value_to_label(fixed_filter_tf_val)
 
             df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, fixed_filter_tf)
             if df_exec_raw.empty:
@@ -311,7 +338,10 @@ def process_global_backtesting():
             df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
 
             for i, mode in enumerate(filter_modes_to_compare):
-                progress_bar.progress((i + 1) / len(filter_modes_to_compare), text=f"Ejecutando para filtro: {mode} (Timeframe: {fixed_filter_tf})")
+                progress_bar.progress(
+                    (i + 1) / len(filter_modes_to_compare),
+                    text=f"Ejecutando para filtro: {mode} (Timeframe: {fixed_filter_tf})",
+                )
                 trades, equity = run_single_backtest_iteration(df_enriched_local.copy(), tz_handler, mode)
                 st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity}
             
@@ -320,7 +350,12 @@ def process_global_backtesting():
         
         # Lógica de Backtest Único
         else:
-            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, st.session_state.ui_exec_timeframe, st.session_state.ui_filter_timeframe)
+            filter_tf = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
+            df_exec_raw, df_filter_raw = load_data_for_backtest(
+                dm,
+                st.session_state.ui_exec_timeframe,
+                filter_tf,
+            )
             if df_exec_raw.empty:
                 st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
 
@@ -441,14 +476,20 @@ def go_to_next_day_visual():
 
 
 def timeframe_to_minutes(tf: str) -> int:
-    """Convierte un timeframe en minutos."""
-    value, unit = tf.split()
-    minutes = int(value)
-    if unit.startswith("hour"):
-        minutes *= 60
-    elif unit.startswith("day"):
-        minutes *= 60 * 24
-    return minutes
+    """Convierte un timeframe (label o value) en minutos."""
+    tf = tf.strip().lower()
+    match = re.match(r"(\d+)\s*(\w+)?", tf)
+    if not match:
+        return 0
+    value = int(match.group(1))
+    unit = match.group(2) or "min"
+    if unit.startswith("min"):
+        return value
+    if unit.startswith("hour") or unit == "h":
+        return value * 60
+    if unit.startswith("day") or unit == "d":
+        return value * 60 * 24
+    return value
 
 
 def get_exec_timeframe_options(market: str) -> list[str]:
@@ -457,8 +498,14 @@ def get_exec_timeframe_options(market: str) -> list[str]:
 
 
 def get_filter_timeframe_options(market: str) -> list[str]:
-    """Devuelve opciones de timeframe para el filtro EMA según el mercado."""
-    return ["1 min", "5 mins"] if market == "forex" else config.EMA_FILTER_TIMEFRAMES
+    """Devuelve opciones de timeframe (valores) para el filtro EMA según el mercado."""
+    if market == "forex":
+        return ["1min", "5min"]
+    return [
+        opt["value"]
+        for opt in config.EMA_FILTER_TIMEFRAME_OPTIONS
+        if opt["value"] != "compare"
+    ]
 
 
 def handle_market_change():
@@ -483,10 +530,11 @@ def handle_market_change():
 
     filter_options = get_filter_timeframe_options(market)
     if (
-        st.session_state.ui_filter_timeframe not in filter_options
-        and st.session_state.ui_filter_timeframe != "Comparar Timeframes"
+        st.session_state.ema_filter_timeframe not in filter_options
+        and st.session_state.ema_filter_timeframe != "compare"
     ):
-        st.session_state.ui_filter_timeframe = filter_options[0]
+        st.session_state.ema_filter_timeframe = filter_options[0]
+    st.session_state.ema_tf_select = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
 
 with st.sidebar:
     st.title("Configuración")
@@ -562,25 +610,44 @@ with st.sidebar:
         if st.session_state.ui_market == "forex" and st.session_state.ui_exec_timeframe == "1 min":
             st.caption("Para rangos largos usa 1–3 días; el sistema fragmenta las descargas para evitar timeouts de HMDS.")
 
-        filter_tf_base_options = get_filter_timeframe_options(st.session_state.ui_market)
+        filter_tf_base_values = get_filter_timeframe_options(st.session_state.ui_market)
         if (
-            st.session_state.ui_filter_timeframe not in filter_tf_base_options
-            and st.session_state.ui_filter_timeframe != "Comparar Timeframes"
+            st.session_state.ema_filter_timeframe not in filter_tf_base_values
+            and st.session_state.ema_filter_timeframe != "compare"
         ):
-            st.session_state.ui_filter_timeframe = filter_tf_base_options[0]
-        timeframe_options = filter_tf_base_options + ["Comparar Timeframes"]
-        st.selectbox(
+            st.session_state.ema_filter_timeframe = filter_tf_base_values[0]
+
+        options = filter_tf_base_values + ["compare"]
+        labels = [ema_tf_value_to_label(val) for val in options]
+        default_idx = next(
+            (
+                i
+                for i, val in enumerate(options)
+                if val == st.session_state.ema_filter_timeframe
+                or val == config.DEFAULT_EMA_FILTER_TIMEFRAME
+                or ema_tf_value_to_label(val) == config.DEFAULT_EMA_FILTER_TIMEFRAME
+            ),
+            0,
+        )
+
+        selected_label = st.selectbox(
             "Timeframe del Filtro EMA",
-            options=timeframe_options,
-            key="ui_filter_timeframe",
+            labels,
+            index=default_idx,
+            key="ema_tf_select",
             help="Timeframe para calcular las EMAs. Puede ser igual o superior al de ejecución.",
         )
 
-        if st.session_state.ui_filter_timeframe != "Comparar Timeframes":
+        selected_value = options[labels.index(selected_label)]
+        st.session_state.ema_filter_timeframe = selected_value
+
+        if st.session_state.ema_filter_timeframe != "compare":
             exec_minutes = timeframe_to_minutes(st.session_state.ui_exec_timeframe)
-            filter_minutes = timeframe_to_minutes(st.session_state.ui_filter_timeframe)
+            filter_minutes = timeframe_to_minutes(st.session_state.ema_filter_timeframe)
             if filter_minutes < exec_minutes:
-                st.warning("Se recomienda usar un timeframe del filtro EMA >= al de ejecución.")
+                st.warning(
+                    "Se recomienda usar un timeframe del filtro EMA >= al de ejecución."
+                )
         st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
