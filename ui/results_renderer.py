@@ -92,7 +92,7 @@ def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_e
     html += "</table>"
     return html
 
-def render_global_results(filter_name="default"):
+def render_global_results(filter_name: str = ""):
     """Función principal para mostrar todos los componentes de la página de resultados."""
     st.header("Resultados del Backtest Global")
     
@@ -250,16 +250,32 @@ def render_global_results(filter_name="default"):
                 xaxis_title="Fecha",
                 hovermode="x unified"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key=f"{filter_name}_equity",
+            )
 
     with chart_col2:
         st.subheader("Métricas Adicionales")
         avg_win = metrics.get('Ganancia Promedio ($)', 0)
         avg_loss = metrics.get('Pérdida Promedio ($)', 0)
         
-        st.metric("Trade Ganador Promedio", f"${avg_win:,.2f}")
-        st.metric("Trade Perdedor Promedio", f"${avg_loss:,.2f}")
-        st.metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.2f}%")
+        st.metric(
+            "Trade Ganador Promedio",
+            f"${avg_win:,.2f}",
+            key=f"{filter_name}_metric_avg_win",
+        )
+        st.metric(
+            "Trade Perdedor Promedio",
+            f"${avg_loss:,.2f}",
+            key=f"{filter_name}_metric_avg_loss",
+        )
+        st.metric(
+            "Max Drawdown",
+            f"{metrics.get('Max Drawdown (%)', 0):.2f}%",
+            key=f"{filter_name}_metric_max_dd",
+        )
 
     st.markdown("---")
     
@@ -301,7 +317,11 @@ def render_global_results(filter_name="default"):
         fig_monthly_pnl.update_xaxes(tickangle=45) 
         # --- FIN DE LA SOLUCIÓN DEFINITIVA ---
         
-        st.plotly_chart(fig_monthly_pnl, use_container_width=True)
+        st.plotly_chart(
+            fig_monthly_pnl,
+            use_container_width=True,
+            key=f"{filter_name}_monthly_pnl",
+        )
 
     with tab1:
         daily_pnl_agg = trades_df.set_index('entry_time_dt').groupby(pd.Grouper(freq='D'))['pnl_net'].agg(['sum', 'count'])
@@ -355,5 +375,19 @@ def render_global_results(filter_name="default"):
     trades_display['entry_time_str'] = trades_display['entry_time_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
     trades_display['exit_time_str'] = pd.to_datetime(trades_display['exit_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz).dt.strftime('%Y-%m-%d %H:%M:%S')
     
-    st.dataframe(trades_display[['entry_time_str', 'exit_time_str', 'direction', 'size', 'entry_price', 'exit_price', 'pnl_net', 'exit_reason']])
+    st.dataframe(
+        trades_display[
+            [
+                'entry_time_str',
+                'exit_time_str',
+                'direction',
+                'size',
+                'entry_price',
+                'exit_price',
+                'pnl_net',
+                'exit_reason',
+            ]
+        ],
+        key=f"{filter_name}_trades_table",
+    )
 
