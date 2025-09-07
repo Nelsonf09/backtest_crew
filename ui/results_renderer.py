@@ -260,22 +260,24 @@ def render_global_results(filter_name: str = ""):
         st.subheader("Métricas Adicionales")
         avg_win = metrics.get('Ganancia Promedio ($)', 0)
         avg_loss = metrics.get('Pérdida Promedio ($)', 0)
-        
-        st.metric(
-            "Trade Ganador Promedio",
-            f"${avg_win:,.2f}",
-            key=f"{filter_name}_metric_avg_win",
-        )
-        st.metric(
-            "Trade Perdedor Promedio",
-            f"${avg_loss:,.2f}",
-            key=f"{filter_name}_metric_avg_loss",
-        )
-        st.metric(
-            "Max Drawdown",
-            f"{metrics.get('Max Drawdown (%)', 0):.2f}%",
-            key=f"{filter_name}_metric_max_dd",
-        )
+
+        with st.container(key=f"{filter_name}_metrics_block"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "Trade Ganador Promedio",
+                    f"${avg_win:,.2f}",
+                )
+            with col2:
+                st.metric(
+                    "Trade Perdedor Promedio",
+                    f"${avg_loss:,.2f}",
+                )
+            with col3:
+                st.metric(
+                    "Max Drawdown",
+                    f"{metrics.get('Max Drawdown (%)', 0):.2f}%",
+                )
 
     st.markdown("---")
     
