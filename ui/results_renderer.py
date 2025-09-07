@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from agent_core.metrics import calculate_performance_metrics
+from agent_core.performance import drawdown_curve_from_equity
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
     """Genera el HTML para el calendario de rendimiento mensual."""
@@ -191,7 +192,8 @@ def render_global_results(filter_name: str = ""):
     st.markdown("---")
 
     chart_col1, chart_col2 = st.columns([2, 1])
-    
+    max_dd_pct = 0.0
+
     with chart_col1:
         st.subheader("Curva de Equity")
         if not equity_df.empty:
@@ -256,6 +258,15 @@ def render_global_results(filter_name: str = ""):
                 key=f"{filter_name}_equity",
             )
 
+            dd_df = drawdown_curve_from_equity(equity_df_chart['equity'])
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=dd_df.index, y=dd_df['dd_pct'], mode="lines", name="Drawdown (%)"))
+            fig_dd.update_layout(title="Curva de Drawdown (%)", xaxis_title="Fecha", yaxis_title="Drawdown (%)", hovermode="x unified")
+            _k = f"{filter_name}_plot_dd" if filter_name else "default_plot_dd"
+            st.plotly_chart(fig_dd, use_container_width=True, key=_k)
+            max_dd_pct = dd_df.attrs.get('max_dd_pct', float(dd_df['dd_pct'].min()))
+            metrics["Max Drawdown (%)"] = max_dd_pct
+
     with chart_col2:
         st.subheader("Métricas Adicionales")
         avg_win = metrics.get('Ganancia Promedio ($)', 0)
@@ -276,7 +287,7 @@ def render_global_results(filter_name: str = ""):
             with col3:
                 st.metric(
                     "Max Drawdown",
-                    f"{metrics.get('Max Drawdown (%)', 0):.2f}%",
+                    f"{max_dd_pct:.2f}%",
                 )
 
     st.markdown("---")

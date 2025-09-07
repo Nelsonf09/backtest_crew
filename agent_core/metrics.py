@@ -4,6 +4,8 @@ import numpy as np
 import logging
 from decimal import Decimal
 
+from agent_core.performance import drawdown_curve_from_equity
+
 # Logger específico
 logger = logging.getLogger(__name__)
 
@@ -82,7 +84,8 @@ def calculate_performance_metrics(trades: list, initial_capital: float,
         try:
             equity_df = pd.DataFrame(equity_history, columns=["time", "equity"])
             equity_df["equity"] = pd.to_numeric(equity_df["equity"])
-            metrics["Max Drawdown (%)"] = compute_max_drawdown(equity_df["equity"])
+            dd = drawdown_curve_from_equity(equity_df["equity"])
+            metrics["Max Drawdown (%)"] = dd.attrs.get('max_dd_pct', float(dd['dd_pct'].min()))
         except Exception as e_dd:
             logger.error(f"Error calculando Max Drawdown: {e_dd}", exc_info=True)
             metrics["Max Drawdown (%)"] = 0.0  # Fallback a 0.0 en caso de error
@@ -94,4 +97,5 @@ if __name__ == "__main__":
     # Pequeña prueba manual del cálculo de Max Drawdown
     equity_example = pd.Series([100, 120, 80, 90, 70, 150])
     print("Equity:", equity_example.tolist())
-    print("Max Drawdown (%):", compute_max_drawdown(equity_example))
+    dd_example = drawdown_curve_from_equity(equity_example)
+    print("Max Drawdown (%):", dd_example.attrs.get('max_dd_pct'))
