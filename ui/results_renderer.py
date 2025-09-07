@@ -10,8 +10,10 @@ import calendar
 import plotly.graph_objects as go
 import plotly.express as px
 
-from agent_core.metrics import compute_drawdown_series
-from agent_core.utils.metrics import compute_global_metrics
+from agent_core.utils.metrics import (
+    compute_global_metrics,
+    compute_drawdown_series_pct,
+)
 from ui.utils.ui_keys import wkey
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
@@ -123,14 +125,16 @@ def render_global_results(filter_name: str = ""):
     pnl_series = trades_df['pnl_net']
     winning = pnl_series[pnl_series > 0]
     losing = pnl_series[pnl_series < 0]
-    metrics['Ganancia Promedio ($)'] = round(winning.mean(), 2) if not winning.empty else 0.0
-    metrics['Pérdida Promedio ($)'] = round(abs(losing.mean()), 2) if not losing.empty else 0.0
+    metrics['Ganancia Promedio ($)'] = float(winning.mean()) if not winning.empty else 0.0
+    metrics['Pérdida Promedio ($)'] = float(abs(losing.mean())) if not losing.empty else 0.0
     if metrics['Pérdida Promedio ($)'] > 0:
-        metrics['Ratio Ganancia/Pérdida Prom.'] = round(
-            metrics['Ganancia Promedio ($)'] / metrics['Pérdida Promedio ($)'], 2
+        metrics['Ratio Ganancia/Pérdida Prom.'] = (
+            metrics['Ganancia Promedio ($)'] / metrics['Pérdida Promedio ($)']
         )
     else:
-        metrics['Ratio Ganancia/Pérdida Prom.'] = float('inf') if metrics['Ganancia Promedio ($)'] > 0 else 'N/A'
+        metrics['Ratio Ganancia/Pérdida Prom.'] = (
+            float('inf') if metrics['Ganancia Promedio ($)'] > 0 else 0.0
+        )
     st.session_state.metrics = metrics
 
     st.markdown("---")
@@ -290,14 +294,13 @@ def render_global_results(filter_name: str = ""):
             )
 
             equity_series = equity_df_chart["equity"]
-            dd_curve = compute_drawdown_series(equity_series).mul(100.0)
-            st.session_state.drawdown_series = dd_curve
-            assert abs(metrics["Max Drawdown (%)"] - (-dd_curve.min())) < 1e-6
+            dd_curve_pct = compute_drawdown_series_pct(equity_series)
+            st.session_state.drawdown_series = dd_curve_pct
             fig_dd = go.Figure()
             fig_dd.add_trace(
                 go.Scatter(
-                    x=dd_curve.index,
-                    y=dd_curve,
+                    x=dd_curve_pct.index,
+                    y=dd_curve_pct,
                     mode="lines",
                     name="Drawdown (%)",
                     connectgaps=False,
