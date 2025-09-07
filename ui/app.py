@@ -89,7 +89,6 @@ def initialize_session_state():
             "5min",
         ),
     )
-    st.session_state.ema_tf_select = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
     st.session_state.ui_download_start = _start
     st.session_state.ui_download_end = _today
     st.session_state.ui_replay_start_date = max(_start, _today - datetime.timedelta(days=1))
@@ -498,9 +497,7 @@ def get_exec_timeframe_options(market: str) -> list[str]:
 
 
 def get_filter_timeframe_options(market: str) -> list[str]:
-    """Devuelve opciones de timeframe (valores) para el filtro EMA según el mercado."""
-    if market == "forex":
-        return ["1min", "5min"]
+    """Devuelve opciones de timeframe (valores) para el filtro EMA."""
     return [
         opt["value"]
         for opt in config.EMA_FILTER_TIMEFRAME_OPTIONS
@@ -534,7 +531,6 @@ def handle_market_change():
         and st.session_state.ema_filter_timeframe != "compare"
     ):
         st.session_state.ema_filter_timeframe = filter_options[0]
-    st.session_state.ema_tf_select = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
 
 with st.sidebar:
     st.title("Configuración")
@@ -610,35 +606,37 @@ with st.sidebar:
         if st.session_state.ui_market == "forex" and st.session_state.ui_exec_timeframe == "1 min":
             st.caption("Para rangos largos usa 1–3 días; el sistema fragmenta las descargas para evitar timeouts de HMDS.")
 
-        filter_tf_base_values = get_filter_timeframe_options(st.session_state.ui_market)
+        ema_options = config.EMA_FILTER_TIMEFRAME_OPTIONS
+        available_values = [opt["value"] for opt in ema_options]
         if (
-            st.session_state.ema_filter_timeframe not in filter_tf_base_values
+            st.session_state.ema_filter_timeframe not in available_values
             and st.session_state.ema_filter_timeframe != "compare"
         ):
-            st.session_state.ema_filter_timeframe = filter_tf_base_values[0]
+            st.session_state.ema_filter_timeframe = config.DEFAULT_EMA_FILTER_TIMEFRAME
 
-        options = filter_tf_base_values + ["compare"]
-        labels = [ema_tf_value_to_label(val) for val in options]
+        labels = [opt["label"] for opt in ema_options]
         default_idx = next(
             (
                 i
-                for i, val in enumerate(options)
-                if val == st.session_state.ema_filter_timeframe
-                or val == config.DEFAULT_EMA_FILTER_TIMEFRAME
-                or ema_tf_value_to_label(val) == config.DEFAULT_EMA_FILTER_TIMEFRAME
+                for i, opt in enumerate(ema_options)
+                if opt["value"] == config.DEFAULT_EMA_FILTER_TIMEFRAME
+                or opt["label"] == config.DEFAULT_EMA_FILTER_TIMEFRAME
             ),
             0,
         )
 
+        market = st.session_state.ui_market
         selected_label = st.selectbox(
             "Timeframe del Filtro EMA",
             labels,
             index=default_idx,
-            key="ema_tf_select",
+            key=f"ema_tf_select_{market}",
             help="Timeframe para calcular las EMAs. Puede ser igual o superior al de ejecución.",
         )
 
-        selected_value = options[labels.index(selected_label)]
+        selected_value = next(
+            opt["value"] for opt in ema_options if opt["label"] == selected_label
+        )
         st.session_state.ema_filter_timeframe = selected_value
 
         if st.session_state.ema_filter_timeframe != "compare":
