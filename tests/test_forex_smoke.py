@@ -1,6 +1,7 @@
 import datetime
 import sys
 from pathlib import Path
+import pandas as pd
 import pytest
 
 # Ensure package import paths
@@ -8,7 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from agent_core.data_manager import DataManager
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
-from agent_core.metrics import calculate_performance_metrics
+from agent_core.utils.metrics import compute_global_metrics
 
 
 def test_forex_smoke():
@@ -42,7 +43,9 @@ def test_forex_smoke():
         day_levels={},
     )
 
-    metrics = calculate_performance_metrics(trades.tolist(), 1000.0, equity.tolist())
+    trade_list = [{"pnl": t[6]} for t in trades.tolist()]
+    equity_series = pd.Series([e[1] for e in equity.tolist()])
+    metrics = compute_global_metrics(equity_series, trade_list, 1000.0)
     result = {"symbol": "EURUSD", "market": "forex", "metrics": metrics}
 
     assert result["symbol"] == "EURUSD"

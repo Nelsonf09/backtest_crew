@@ -5,11 +5,7 @@ Módulo para renderizar el dashboard de comparación de resultados de backtests.
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from agent_core.metrics import (
-    calculate_performance_metrics,
-    compute_drawdown_series,
-    compute_max_drawdown_pct,
-)
+from agent_core.metrics import compute_drawdown_series
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -30,18 +26,13 @@ def render_comparison_dashboard():
     dd_curves = {}
     # La clave del diccionario (ej. 'Fuerte' o '5 mins') se usa como nombre.
     for name, results in comparison_results.items():
-        metrics = calculate_performance_metrics(
-            results['trades'].to_dict('records'),
-            st.session_state.ui_initial_capital,
-            results['equity'].values.tolist()
-        )
+        metrics = results['metrics']
         equity_df = results['equity'].copy()
         equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
         eq_series = equity_df.set_index('time')['equity']
         dd_curve = compute_drawdown_series(eq_series).mul(100.0)
-        mdd = compute_max_drawdown_pct(eq_series)
-        metrics['Max Drawdown (%)'] = mdd
         dd_curves[name] = dd_curve
+        assert abs(metrics['Max Drawdown (%)'] - (-dd_curve.min())) < 1e-6
         metrics_data.append({
             'Configuración': name,
             'Ganancia Neta Total ($)': metrics.get('Ganancia Neta Total ($)', 0),
@@ -49,7 +40,7 @@ def render_comparison_dashboard():
             'Win Rate (%)': metrics.get('Win Rate (%)', 0),
             'Profit Factor': metrics.get('Profit Factor', 'N/A'),
             'Max Drawdown (%)': metrics.get('Max Drawdown (%)', 0),
-            'Trades Totales': metrics.get('Total Trades', 0)
+            'Trades Totales': metrics.get('Trades Totales', 0)
         })
 
     df_metrics = pd.DataFrame(metrics_data).set_index('Configuración')

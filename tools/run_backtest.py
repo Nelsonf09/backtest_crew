@@ -18,7 +18,7 @@ from agent_core.data_manager import DataManager
 from agent_core.technical_analyzer import add_technical_indicators
 from shared.timezone_handler import TimezoneHandler
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
-from agent_core.metrics import calculate_performance_metrics
+from agent_core.utils.metrics import compute_global_metrics
 
 
 def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_path: Path) -> None:
@@ -134,10 +134,12 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
     final_trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
     final_equity = pd.concat(full_equity_history, ignore_index=True) if full_equity_history else pd.DataFrame()
 
-    metrics = calculate_performance_metrics(
-        final_trades.to_dict("records"),
+    trades_list = final_trades.rename(columns={"pnl_net": "pnl"}).to_dict("records")
+    equity_series = final_equity["equity"] if not final_equity.empty else pd.Series(dtype=float)
+    metrics = compute_global_metrics(
+        equity_series,
+        trades_list,
         config.INITIAL_CAPITAL,
-        final_equity.values.tolist(),
     )
     output = {"metrics": metrics, "trades": final_trades.to_dict("records")}
     out_path.write_text(json.dumps(output, indent=2))
