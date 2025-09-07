@@ -66,8 +66,10 @@ def initialize_session_state():
     st.session_state.all_data_utc = pd.DataFrame()
     st.session_state.session_trades = []
     st.session_state.performance_metrics = {}
+    st.session_state.metrics = {}
     st.session_state.global_equity_history = pd.DataFrame()
     st.session_state.comparison_results = {}
+    st.session_state.drawdown_series = pd.Series(dtype=float)
     st.session_state.comparison_type = None # Para saber qué se está comparando
     st.session_state.df_context_display = pd.DataFrame()
     st.session_state.df_replay_display = pd.DataFrame()
@@ -117,6 +119,30 @@ def initialize_session_state():
 
 
 initialize_session_state()
+
+
+def clear_backtest_state():
+    """Clear cached metrics and series when switching modes."""
+    st.session_state.metrics = {}
+    st.session_state.global_equity_history = pd.DataFrame()
+    st.session_state.drawdown_series = pd.Series(dtype=float)
+    st.session_state.comparison_results = {}
+
+
+def check_mode_change():
+    """Reset caches if the comparison mode changes."""
+    mode = (
+        "compare_timeframes"
+        if st.session_state.ema_filter_timeframe == "compare"
+        else (
+            "compare_filters"
+            if st.session_state.ui_ema_filter == "Comparar Filtros"
+            else "single"
+        )
+    )
+    if st.session_state.get("_mode") != mode:
+        clear_backtest_state()
+    st.session_state._mode = mode
 
 def execute_backtest():
     st.session_state.calendar_month_offset = 0
@@ -646,7 +672,12 @@ with st.sidebar:
                 st.warning(
                     "Se recomienda usar un timeframe del filtro EMA >= al de ejecución."
                 )
-        st.selectbox("Filtro EMA (OBR)", options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"], key="ui_ema_filter")
+        st.selectbox(
+            "Filtro EMA (OBR)",
+            options=["Desactivado", "Moderado", "Fuerte", "Comparar Filtros"],
+            key="ui_ema_filter",
+        )
+        check_mode_change()
         st.select_slider("Apalancamiento", options=[1, 5, 10, 20, 50, 100], key="ui_leverage")
         st.selectbox("Timezone Gráfico", options=pytz.common_timezones, key="ui_display_tz")
 
