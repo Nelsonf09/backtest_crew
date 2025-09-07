@@ -10,11 +10,8 @@ import calendar
 import plotly.graph_objects as go
 import plotly.express as px
 
-from agent_core.metrics import (
-    calculate_performance_metrics,
-    compute_drawdown_series,
-    compute_max_drawdown_pct,
-)
+from agent_core.metrics import compute_drawdown_series
+from agent_core.utils.metrics import compute_global_metrics
 from ui.utils.ui_keys import wkey
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
@@ -115,11 +112,25 @@ def render_global_results(filter_name: str = ""):
     
     trades_df['entry_time_dt'] = pd.to_datetime(trades_df['entry_time'], unit='s', utc=True).dt.tz_convert(st.session_state.ui_display_tz)
 
-    metrics = calculate_performance_metrics(
-        trades_df.to_dict('records'),
+    equity_series = equity_df['equity'] if not equity_df.empty else pd.Series(dtype=float)
+    trades_list = trades_df.rename(columns={'pnl_net': 'pnl'}).to_dict('records')
+    metrics = compute_global_metrics(
+        equity_series,
+        trades_list,
         st.session_state.ui_initial_capital,
-        equity_df.values.tolist(),
     )
+    # Métricas adicionales para la UI
+    pnl_series = trades_df['pnl_net']
+    winning = pnl_series[pnl_series > 0]
+    losing = pnl_series[pnl_series < 0]
+    metrics['Ganancia Promedio ($)'] = round(winning.mean(), 2) if not winning.empty else 0.0
+    metrics['Pérdida Promedio ($)'] = round(abs(losing.mean()), 2) if not losing.empty else 0.0
+    if metrics['Pérdida Promedio ($)'] > 0:
+        metrics['Ratio Ganancia/Pérdida Prom.'] = round(
+            metrics['Ganancia Promedio ($)'] / metrics['Pérdida Promedio ($)'], 2
+        )
+    else:
+        metrics['Ratio Ganancia/Pérdida Prom.'] = float('inf') if metrics['Ganancia Promedio ($)'] > 0 else 'N/A'
     st.session_state.metrics = metrics
 
     st.markdown("---")
@@ -189,7 +200,7 @@ def render_global_results(filter_name: str = ""):
         st.markdown(
             create_metric_html(
                 "Trades Totales",
-                f"{metrics.get('Total Trades', 0)}",
+                f"{metrics.get('Trades Totales', 0)}",
             ),
             unsafe_allow_html=True,
         )
@@ -281,7 +292,7 @@ def render_global_results(filter_name: str = ""):
             equity_series = equity_df_chart["equity"]
             dd_curve = compute_drawdown_series(equity_series).mul(100.0)
             st.session_state.drawdown_series = dd_curve
-            mdd = compute_max_drawdown_pct(equity_series)
+            assert abs(metrics["Max Drawdown (%)"] - (-dd_curve.min())) < 1e-6
             fig_dd = go.Figure()
             fig_dd.add_trace(
                 go.Scatter(
@@ -302,8 +313,7 @@ def render_global_results(filter_name: str = ""):
                 fig_dd,
                 use_container_width=True,
             )
-            max_dd_pct = mdd
-            metrics["Max Drawdown (%)"] = max_dd_pct
+            max_dd_pct = metrics["Max Drawdown (%)"]
 
     with chart_col2:
         st.subheader("Métricas Adicionales")

@@ -32,7 +32,7 @@ from ui.results_renderer import render_global_results
 from ui.comparison_renderer import render_comparison_dashboard
 from streamlit_lightweight_charts import renderLightweightCharts
 from agent_core.execution import ExecutionSimulator, TradeState
-from agent_core.metrics import calculate_performance_metrics
+from agent_core.utils.metrics import compute_global_metrics
 from shared.timezone_handler import TimezoneHandler, apply_timezone_fixes
 from shared.fsm import FSM, AppState
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
@@ -341,7 +341,12 @@ def process_global_backtesting():
                 df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
 
                 trades, equity = run_single_backtest_iteration(df_enriched_local, tz_handler, fixed_ema_filter_mode)
-                st.session_state.comparison_results[tf_label] = {'trades': trades, 'equity': equity}
+                metrics = compute_global_metrics(
+                    equity['equity'] if not equity.empty else pd.Series(dtype=float),
+                    trades.rename(columns={'pnl_net': 'pnl'}).to_dict('records'),
+                    st.session_state.ui_initial_capital,
+                )
+                st.session_state.comparison_results[tf_label] = {'trades': trades, 'equity': equity, 'metrics': metrics}
 
             progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
@@ -368,7 +373,12 @@ def process_global_backtesting():
                     text=f"Ejecutando para filtro: {mode} (Timeframe: {fixed_filter_tf})",
                 )
                 trades, equity = run_single_backtest_iteration(df_enriched_local.copy(), tz_handler, mode)
-                st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity}
+                metrics = compute_global_metrics(
+                    equity['equity'] if not equity.empty else pd.Series(dtype=float),
+                    trades.rename(columns={'pnl_net': 'pnl'}).to_dict('records'),
+                    st.session_state.ui_initial_capital,
+                )
+                st.session_state.comparison_results[mode] = {'trades': trades, 'equity': equity, 'metrics': metrics}
             
             progress_bar.empty()
             st.session_state.app_fsm.transition_to(AppState.SHOWING_COMPARISON)
@@ -474,6 +484,21 @@ def process_and_prepare_daily_data_visual():
     st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = [], [], {}
     st.session_state.app_fsm.transition_to(AppState.PAUSED)
 
+def recompute_performance_metrics():
+    equity_hist = st.session_state.executor.get_equity_history()
+    equity_series = (
+        pd.Series([e[1] for e in equity_hist]) if equity_hist else pd.Series(dtype=float)
+    )
+    trades_list = [
+        {**t, "pnl": t.get("pnl_net", t.get("pnl", 0.0))}
+        for t in st.session_state.session_trades
+    ]
+    return compute_global_metrics(
+        equity_series,
+        trades_list,
+        st.session_state.ui_initial_capital,
+    )
+
 def close_position_manually_visual():
     executor = st.session_state.executor
     if executor.account_fsm.is_in_state(TradeState.ACTIVE):
@@ -489,7 +514,7 @@ def close_position_manually_visual():
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
-                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
+                st.session_state.performance_metrics = recompute_performance_metrics()
         st.toast("Posición cerrada manualmente.")
 
 def go_to_next_day_visual():
@@ -717,7 +742,8 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
 
     idx, current_candle, executor = st.session_state.current_index, df_replay.iloc[st.session_state.current_index], st.session_state.executor
     if executor.leverage != st.session_state.ui_leverage: executor.set_leverage(st.session_state.ui_leverage)
-    if not st.session_state.performance_metrics: st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
+    if not st.session_state.performance_metrics:
+        st.session_state.performance_metrics = recompute_performance_metrics()
 
     if not fsm.is_in_state(AppState.FINISHED):
         dfs_to_concat_hist = [df for df in [st.session_state.df_context_display, df_replay.iloc[:idx+1]] if not df.empty]
@@ -744,7 +770,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
                 }
-                st.session_state.performance_metrics = calculate_performance_metrics(st.session_state.session_trades, st.session_state.ui_initial_capital, executor.get_equity_history())
+                st.session_state.performance_metrics = recompute_performance_metrics()
                 if fsm.is_in_state(AppState.REPLAYING): fsm.transition_to(AppState.PAUSED); st.toast("Autoplay pausado.")
             else:
                 st.session_state.last_closed_trade_levels = {}
@@ -763,7 +789,7 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         st.divider()
         st.subheader("Métricas del Backtest")
         metrics = st.session_state.performance_metrics
-        st.metric("Trades Totales", metrics.get("Total Trades", 0))
+        st.metric("Trades Totales", metrics.get("Trades Totales", 0))
         st.metric("Win Rate (%)", f"{metrics.get('Win Rate (%)', 0.0):.2f}%")
         st.metric("Profit Factor", f"{metrics.get('Profit Factor', 'N/A')}")
         st.metric("Max Drawdown (%)", f"{metrics.get('Max Drawdown (%)', 0.0):.2f}%")
