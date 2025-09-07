@@ -94,7 +94,7 @@ def render_comparison_dashboard():
         xaxis_title="Fecha",
         legend_title_text=comparison_type
     )
-    st.plotly_chart(fig, use_container_width=True, key="comparison_equity_chart")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Curvas de Drawdown Comparadas")
     if dd_curves:
@@ -119,7 +119,7 @@ def render_comparison_dashboard():
             hovermode="x unified",
         )
         st.plotly_chart(
-            fig_ddc, use_container_width=True, key="comparison_dd_chart"
+            fig_ddc, use_container_width=True
         )
 
     # --- 3. Vistas Detalladas en Pestañas ---

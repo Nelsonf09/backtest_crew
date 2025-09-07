@@ -15,6 +15,7 @@ from agent_core.metrics import (
     compute_drawdown_series,
     compute_max_drawdown_pct,
 )
+from ui.utils.ui_keys import wkey
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
     """Genera el HTML para el calendario de rendimiento mensual."""
@@ -173,7 +174,7 @@ def render_global_results(filter_name: str = ""):
 
     ganancia_neta_pct = metrics.get('Ganancia Neta Total (%)', 0)
     delta_color = "positive" if ganancia_neta_pct >= 0 else "negative"
-    
+
     with col1:
         st.markdown(
             create_metric_html(
@@ -183,7 +184,6 @@ def render_global_results(filter_name: str = ""):
                 delta_color,
             ),
             unsafe_allow_html=True,
-            key=f"{filter_name}_metric_net_profit",
         )
     with col2:
         st.markdown(
@@ -192,7 +192,6 @@ def render_global_results(filter_name: str = ""):
                 f"{metrics.get('Total Trades', 0)}",
             ),
             unsafe_allow_html=True,
-            key=f"{filter_name}_metric_total_trades",
         )
     with col3:
         st.markdown(
@@ -201,7 +200,6 @@ def render_global_results(filter_name: str = ""):
                 f"{metrics.get('Win Rate (%)', 0):.2f}%",
             ),
             unsafe_allow_html=True,
-            key=f"{filter_name}_metric_win_rate",
         )
     with col4:
         st.markdown(
@@ -210,7 +208,6 @@ def render_global_results(filter_name: str = ""):
                 f"{metrics.get('Profit Factor', 'N/A')}",
             ),
             unsafe_allow_html=True,
-            key=f"{filter_name}_metric_profit_factor",
         )
     
     st.markdown("---")
@@ -279,7 +276,6 @@ def render_global_results(filter_name: str = ""):
             st.plotly_chart(
                 fig,
                 use_container_width=True,
-                key=f"{filter_name}_equity_chart",
             )
 
             equity_series = equity_df_chart["equity"]
@@ -305,7 +301,6 @@ def render_global_results(filter_name: str = ""):
             st.plotly_chart(
                 fig_dd,
                 use_container_width=True,
-                key=f"{filter_name}_dd_chart",
             )
             max_dd_pct = mdd
             metrics["Max Drawdown (%)"] = max_dd_pct
@@ -315,26 +310,23 @@ def render_global_results(filter_name: str = ""):
         avg_win = metrics.get('Ganancia Promedio ($)', 0)
         avg_loss = metrics.get('Pérdida Promedio ($)', 0)
 
-        with st.container(key=f"{filter_name}_metrics_block"):
+        with st.container():
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric(
                     "Trade Ganador Promedio",
                     f"${avg_win:,.2f}",
-                    key=f"{filter_name}_avg_win",
                 )
             with col2:
                 st.metric(
                     "Trade Perdedor Promedio",
                     f"${avg_loss:,.2f}",
-                    key=f"{filter_name}_avg_loss",
                 )
             with col3:
                 # Mostrar Max Drawdown como porcentaje positivo
                 st.metric(
                     "Max Drawdown",
                     f"{max_dd_pct:.2f}%",
-                    key=f"{filter_name}_max_dd",
                 )
 
     st.markdown("---")
@@ -380,7 +372,6 @@ def render_global_results(filter_name: str = ""):
         st.plotly_chart(
             fig_monthly_pnl,
             use_container_width=True,
-            key=f"{filter_name}_monthly_pnl",
         )
 
     with tab1:
@@ -393,9 +384,9 @@ def render_global_results(filter_name: str = ""):
             start_date = st.session_state.ui_download_start
             
             nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-            if nav_col1.button("◀ Mes Anterior", key=f"prev_month_{filter_name}"):
+            if nav_col1.button("◀ Mes Anterior", key=wkey(filter_name, "prev_month")):
                 st.session_state.calendar_month_offset -= 1
-            if nav_col3.button("Mes Siguiente ▶", key=f"next_month_{filter_name}"):
+            if nav_col3.button("Mes Siguiente ▶", key=wkey(filter_name, "next_month")):
                 st.session_state.calendar_month_offset += 1
             
             current_month_start = (start_date.replace(day=1) + pd.DateOffset(months=st.session_state.calendar_month_offset))
@@ -448,6 +439,5 @@ def render_global_results(filter_name: str = ""):
                 'exit_reason',
             ]
         ],
-        key=f"{filter_name}_trades_table",
     )
 
