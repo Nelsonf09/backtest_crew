@@ -24,6 +24,7 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 import config
+from config.crypto_symbols import CRYPTO_SYMBOLS, DEFAULT_CRYPTO, IB_CRYPTO_EXCHANGE
 from agent_core.main import handle_signal_request
 from agent_core.data_manager import DataManager
 from agent_core.technical_analyzer import add_technical_indicators
@@ -254,6 +255,24 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
             "primary_exchange": None,
             "market": "forex",
         }
+    elif market == "Cryptomonedas":
+        symbol_list = CRYPTO_SYMBOLS
+        if st.session_state.ui_symbol not in symbol_list:
+            st.session_state.ui_symbol = DEFAULT_CRYPTO if DEFAULT_CRYPTO in symbol_list else symbol_list[0]
+        st.session_state.ui_exchange = IB_CRYPTO_EXCHANGE
+        common_params = {
+            "symbol": st.session_state.ui_symbol,
+            "sec_type": "CRYPTO",
+            "exchange": st.session_state.ui_exchange,
+            "currency": st.session_state.ui_currency or "USD",
+            "rth": st.session_state.ui_use_rth,
+            "what_to_show": st.session_state.ui_what_to_show,
+            "download_start_date": adjusted_download_start,
+            "download_end_date": st.session_state.ui_download_end,
+            "use_cache": st.session_state.ui_use_cache,
+            "primary_exchange": None,
+            "market": "crypto",
+        }
     else:
         symbol_list = getattr(config, "STOCK_SYMBOLS_LIST", [])
         exchange_list = getattr(config, "STOCKS_EXCHANGES", [])
@@ -296,11 +315,18 @@ def process_global_backtesting():
     if market == "forex" and st.session_state.ui_primary_exchange:
         st.info("Primary Exchange no aplica en Forex y será ignorado.")
         st.session_state.ui_primary_exchange = ""
-    symbol_list = config.FOREX_SYMBOLS if market == "forex" else config.STOCK_SYMBOLS_LIST
+    if market == "forex":
+        symbol_list = config.FOREX_SYMBOLS
+        exchange_list = config.FOREX_EXCHANGES
+    elif market == "Cryptomonedas":
+        symbol_list = CRYPTO_SYMBOLS
+        exchange_list = [IB_CRYPTO_EXCHANGE]
+    else:
+        symbol_list = config.STOCK_SYMBOLS_LIST
+        exchange_list = config.STOCKS_EXCHANGES
     if st.session_state.ui_symbol not in symbol_list:
         st.info(f"Símbolo inválido para {market}, ajustado a {symbol_list[0]}.")
         st.session_state.ui_symbol = symbol_list[0]
-    exchange_list = config.FOREX_EXCHANGES if market == "forex" else config.STOCKS_EXCHANGES
     if st.session_state.ui_exchange not in exchange_list:
         st.session_state.ui_exchange = exchange_list[0]
 
@@ -565,6 +591,11 @@ def handle_market_change():
         st.session_state.ui_exchange = config.FOREX_EXCHANGES[0]
         st.session_state.ui_primary_exchange = ""
         st.session_state.ui_sec_type = "FOREX"
+    elif market == "Cryptomonedas":
+        st.session_state.ui_symbol = DEFAULT_CRYPTO
+        st.session_state.ui_exchange = IB_CRYPTO_EXCHANGE
+        st.session_state.ui_primary_exchange = ""
+        st.session_state.ui_sec_type = "CRYPTO"
     else:
         st.session_state.ui_symbol = config.STOCK_SYMBOLS_LIST[0]
         st.session_state.ui_exchange = config.STOCKS_EXCHANGES[0]
@@ -588,7 +619,7 @@ with st.sidebar:
     st.title("Configuración")
     with st.expander("1. Instrumento y Rango", expanded=True):
         # MARKET-AWARE UI
-        market_options = ["stocks", "forex"]
+        market_options = ["stocks", "forex", "Cryptomonedas"]
         if st.session_state.ui_market not in market_options:
             st.session_state.ui_market = "stocks"
         st.selectbox("Mercado", options=market_options, key="ui_market", on_change=handle_market_change)
@@ -603,6 +634,15 @@ with st.sidebar:
             st.selectbox("Símbolo", options=symbol_options, key="ui_symbol")
             st.selectbox("Exchange", options=exchange_options, key="ui_exchange")
             st.caption("Forex usa IDEALPRO y no requiere Primary Exchange.")
+            st.session_state.ui_primary_exchange = ""
+            st.text_input("Primary Exch.", value="N/A", disabled=True)
+        elif st.session_state.ui_market == "Cryptomonedas":
+            symbol_options = CRYPTO_SYMBOLS
+            if st.session_state.ui_symbol not in symbol_options:
+                st.session_state.ui_symbol = DEFAULT_CRYPTO if DEFAULT_CRYPTO in symbol_options else symbol_options[0]
+            st.selectbox("Par", options=symbol_options, key="ui_symbol")
+            st.session_state.ui_exchange = IB_CRYPTO_EXCHANGE
+            st.text_input("Exchange", value=IB_CRYPTO_EXCHANGE, disabled=True)
             st.session_state.ui_primary_exchange = ""
             st.text_input("Primary Exch.", value="N/A", disabled=True)
         else:
