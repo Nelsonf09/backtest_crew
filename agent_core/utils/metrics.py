@@ -13,35 +13,7 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 
-
-def compute_drawdown_series_pct(equity: pd.Series) -> pd.Series:
-    """Return the drawdown curve in percentage values (``<= 0``).
-
-    Parameters
-    ----------
-    equity:
-        Series of equity values expressed as floats.
-
-    Returns
-    -------
-    pd.Series
-        Drawdown series as percentages where ``0`` means no drawdown and
-        negative numbers represent drawdowns.
-    """
-
-    equity = equity.astype(float)
-    peak = equity.cummax()
-    return ((equity / peak) - 1.0) * 100.0  # values <= 0
-
-
-def compute_drawdown_pct(equity: pd.Series) -> float:
-    """Return the maximum drawdown as a positive percentage.
-
-    The value is derived from :func:`compute_drawdown_series_pct`.
-    """
-
-    dd_pct_series = compute_drawdown_series_pct(equity)
-    return float(-dd_pct_series.min()) if len(dd_pct_series) else 0.0
+from shared.metrics import drawdown_stats
 
 
 def compute_global_metrics(
@@ -64,7 +36,7 @@ def compute_global_metrics(
         Dictionary of raw (unformatted) metrics.
     """
 
-    dd_pct = compute_drawdown_pct(equity)
+    dd_pct = drawdown_stats(equity)["max_drawdown_pct"]
 
     net = float(equity.iloc[-1] - initial_capital) if len(equity) else 0.0
     net_pct = (
@@ -92,9 +64,5 @@ def compute_global_metrics(
     }
 
 
-__all__ = [
-    "compute_drawdown_series_pct",
-    "compute_drawdown_pct",
-    "compute_global_metrics",
-]
+__all__ = ["compute_global_metrics"]
 

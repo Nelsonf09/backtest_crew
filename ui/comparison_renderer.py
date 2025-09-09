@@ -8,10 +8,8 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from agent_core.utils.metrics import (
-    compute_drawdown_series_pct,
-    compute_global_metrics,
-)
+from agent_core.utils.metrics import compute_global_metrics
+from shared.metrics import drawdown_stats
 from ui.results_renderer import render_global_results
 
 def render_comparison_dashboard():
@@ -45,7 +43,7 @@ def render_comparison_dashboard():
         )
         results['metrics'] = metrics
 
-        dd_curve_pct = compute_drawdown_series_pct(eq_series)
+        dd_curve_pct = drawdown_stats(eq_series)["dd_series_pct"]
         dd_curves[name] = dd_curve_pct
 
         dd_from_curve = float(-dd_curve_pct.min()) if len(dd_curve_pct) else 0.0
