@@ -13,6 +13,7 @@ import pytz
 import math
 import time # <-- IMPORTACIÓN AÑADIDA
 
+from .ib_crypto_support import build_crypto_contract
 from shared.fsm import FSM, ConnectionState # <-- IMPORTAMOS LA FSM
 
 logger = logging.getLogger(__name__)
@@ -190,13 +191,15 @@ class DataManager:
         market = (market or "stocks").lower()
         if market == "forex":
             return False, "MIDPOINT"
+        if market == "crypto":
+            return False, "TRADES"
         return rth, what_to_show
 
     def _get_chunk_params(self, market: str, timeframe: str) -> tuple[int, str, float]:
         """Devuelve (días_por_chunk, duración_IB, pausa) según mercado/timeframe."""
         market = (market or "stocks").lower()
         tf_lower = timeframe.strip().lower()
-        if market == "forex":
+        if market in ("forex", "crypto"):
             if tf_lower == "1 min":
                 return 1, "1 D", 0.5
             if tf_lower == "5 mins":
@@ -215,6 +218,9 @@ class DataManager:
         if market == "forex":
             sec_type = "FOREX"
             exchange = "IDEALPRO"
+        elif market == "crypto":
+            sec_type = "CRYPTO"
+            exchange = getattr(config, 'IB_CRYPTO_EXCHANGE', 'PAXOS')
 
         rth_prev_day, what_to_show = self._normalize_fetch_params(
             market, True, self.config.WHAT_TO_SHOW
@@ -228,7 +234,10 @@ class DataManager:
         if use_cache: df_previous_day = self._load_data_from_cache(cache_filename_pd)
 
         if df_previous_day is None or df_previous_day.empty:
-            contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
+            if market == "crypto":
+                contract_obj = build_crypto_contract(symbol)
+            else:
+                contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
             end_dt_prev_day_market = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time(23, 59, 59)))
             end_dt_prev_day_utc_str = end_dt_prev_day_market.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
             df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, rth_prev_day, what_to_show)
@@ -250,7 +259,10 @@ class DataManager:
 
             _, duration_pm, pause_pm = self._get_chunk_params(market, timeframe_intra)
 
-            contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
+            if market == "crypto":
+                contract_obj = build_crypto_contract(symbol)
+            else:
+                contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
             df_fetched_pm = self._fetch_chunk_with_retry(contract_obj, end_dt_pm_utc_req_str, duration_pm, timeframe_intra, rth_premarket, what_to_show, market)
             if df_fetched_pm is not None and not df_fetched_pm.empty:
                 start_utc = start_dt_pm_market.astimezone(self.UTC_TZ)
@@ -311,13 +323,19 @@ class DataManager:
         if market == "forex":
             sec_type = "FOREX"
             exchange = "IDEALPRO"
+        elif market == "crypto":
+            sec_type = "CRYPTO"
+            exchange = getattr(config, 'IB_CRYPTO_EXCHANGE', 'PAXOS')
 
         rth, what_to_show = self._normalize_fetch_params(market, rth, what_to_show)
 
         # Política de chunking y pausa según el timeframe/mercado
         chunk_days, duration_req_chunk, pause_between_chunks = self._get_chunk_params(market, timeframe)
 
-        contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
+        if market == "crypto":
+            contract = build_crypto_contract(symbol)
+        else:
+            contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
         all_dfs = []
         current_start = download_start_date
 
