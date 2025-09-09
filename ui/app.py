@@ -33,6 +33,7 @@ from ui.comparison_renderer import render_comparison_dashboard
 from streamlit_lightweight_charts import renderLightweightCharts
 from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.utils.metrics import compute_global_metrics
+from shared.metrics import drawdown_stats
 from shared.timezone_handler import TimezoneHandler, apply_timezone_fixes
 from shared.fsm import FSM, AppState
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
