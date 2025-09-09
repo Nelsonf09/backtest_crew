@@ -10,10 +10,8 @@ import calendar
 import plotly.graph_objects as go
 import plotly.express as px
 
-from agent_core.utils.metrics import (
-    compute_global_metrics,
-    compute_drawdown_series_pct,
-)
+from agent_core.utils.metrics import compute_global_metrics
+from shared.metrics import drawdown_stats
 from ui.utils.ui_keys import wkey
 
 def generate_calendar_html(pnl_by_day, year, month, monthly_pnl, monthly_start_equity):
@@ -294,7 +292,7 @@ def render_global_results(filter_name: str = ""):
             )
 
             equity_series = equity_df_chart["equity"]
-            dd_curve_pct = compute_drawdown_series_pct(equity_series)
+            dd_curve_pct = drawdown_stats(equity_series)["dd_series_pct"]
             st.session_state.drawdown_series = dd_curve_pct
             fig_dd = go.Figure()
             fig_dd.add_trace(
