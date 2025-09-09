@@ -292,7 +292,10 @@ def render_global_results(filter_name: str = ""):
             )
 
             equity_series = equity_df_chart["equity"]
-            dd_curve_pct = drawdown_stats(equity_series)["dd_series_pct"]
+            dd_stats = drawdown_stats(equity_series)
+            dd_curve_pct = dd_stats["dd_series_pct"]
+            mdd = dd_stats["max_drawdown_pct"]
+            metrics["Max Drawdown (%)"] = mdd
             st.session_state.drawdown_series = dd_curve_pct
             fig_dd = go.Figure()
             fig_dd.add_trace(
@@ -314,7 +317,6 @@ def render_global_results(filter_name: str = ""):
                 fig_dd,
                 use_container_width=True,
             )
-            max_dd_pct = metrics["Max Drawdown (%)"]
 
     with chart_col2:
         st.subheader("Métricas Adicionales")
@@ -337,7 +339,7 @@ def render_global_results(filter_name: str = ""):
                 # Mostrar Max Drawdown como porcentaje positivo
                 st.metric(
                     "Max Drawdown",
-                    f"{max_dd_pct:.2f}%",
+                    f"{mdd:.2f}%",
                 )
 
     st.markdown("---")

@@ -36,22 +36,24 @@ def render_comparison_dashboard():
 
         trades_df = results['trades']
         trades_list = trades_df.rename(columns={'pnl_net': 'pnl'}).to_dict('records')
+        dd_stats = drawdown_stats(eq_series)
+        mdd = dd_stats['max_drawdown_pct']
+        dd_curve_pct = dd_stats['dd_series_pct']
+        dd_curves[name] = dd_curve_pct
         metrics = compute_global_metrics(
             eq_series,
             trades_list,
             st.session_state.ui_initial_capital,
         )
+        metrics['Max Drawdown (%)'] = mdd
         results['metrics'] = metrics
 
-        dd_curve_pct = drawdown_stats(eq_series)["dd_series_pct"]
-        dd_curves[name] = dd_curve_pct
-
         dd_from_curve = float(-dd_curve_pct.min()) if len(dd_curve_pct) else 0.0
-        if abs(round(dd_from_curve, 2) - round(metrics['Max Drawdown (%)'], 2)) > 0.05:
+        if abs(round(dd_from_curve, 2) - round(mdd, 2)) > 0.05:
             logging.warning(
                 "Max DD mismatch for %s: metrics=%.2f%% curve=%.2f%%",
                 name,
-                metrics['Max Drawdown (%)'],
+                mdd,
                 dd_from_curve,
             )
 
@@ -61,7 +63,7 @@ def render_comparison_dashboard():
             'Ganancia Neta Total (%)': metrics.get('Ganancia Neta Total (%)', 0),
             'Win Rate (%)': metrics.get('Win Rate (%)', 0),
             'Profit Factor': metrics.get('Profit Factor', 0),
-            'Max Drawdown (%)': metrics.get('Max Drawdown (%)', 0),
+            'Max Drawdown (%)': mdd,
             'Trades Totales': metrics.get('Trades Totales', 0)
         })
 
