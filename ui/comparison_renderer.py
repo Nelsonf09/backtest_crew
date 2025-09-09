@@ -14,7 +14,14 @@ from ui._dd_guard import normalize_mdd_from_equity
 from ui._assert_dd_compare import assert_dd_row_consistency
 from ui.results_renderer import render_global_results
 
-DEBUG_DD_COMPARE = st.secrets.get("DEBUG_DD_COMPARE", False) if hasattr(st, "secrets") else False
+# Default to False and only read from secrets when running inside Streamlit with
+# an actual secrets dictionary. This prevents import-time failures when the
+# module is imported outside of a Streamlit context (e.g., during tests).
+DEBUG_DD_COMPARE = False
+if getattr(st, "_is_running_with_streamlit", False):
+    secrets = getattr(st, "secrets", None)
+    if getattr(secrets, "_secrets_dict", None):
+        DEBUG_DD_COMPARE = secrets.get("DEBUG_DD_COMPARE", False)
 
 def render_comparison_dashboard():
     """Muestra un dashboard comparando los resultados de múltiples ejecuciones."""
