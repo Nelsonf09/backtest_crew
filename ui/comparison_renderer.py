@@ -10,7 +10,11 @@ import plotly.graph_objects as go
 
 from agent_core.utils.metrics import compute_global_metrics
 from shared.metrics import drawdown_stats
+from ui._dd_guard import normalize_mdd_from_equity
+from ui._assert_dd_compare import assert_dd_row_consistency
 from ui.results_renderer import render_global_results
+
+DEBUG_DD_COMPARE = st.secrets.get("DEBUG_DD_COMPARE", False) if hasattr(st, "secrets") else False
 
 def render_comparison_dashboard():
     """Muestra un dashboard comparando los resultados de múltiples ejecuciones."""
@@ -28,16 +32,23 @@ def render_comparison_dashboard():
     
     metrics_data = []
     dd_curves = {}
+    equity_dfs = {}
     # La clave del diccionario (ej. 'Fuerte' o '5 mins') se usa como nombre.
     for name, results in comparison_results.items():
         equity_df = results['equity'].copy()
         equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
-        eq_series = equity_df.set_index('time')['equity']
+        equity_df = equity_df.set_index('time')
+        if equity_df.index.duplicated().any():
+            equity_df = equity_df[~equity_df.index.duplicated(keep='last')]
+        equity_df = equity_df.resample('D').last().ffill()
+        eq_series = equity_df['equity']
+        equity_dfs[name] = equity_df
 
         trades_df = results['trades']
         trades_list = trades_df.rename(columns={'pnl_net': 'pnl'}).to_dict('records')
         dd_stats = drawdown_stats(eq_series)
         mdd = dd_stats['max_drawdown_pct']
+        mdd = normalize_mdd_from_equity(eq_series, mdd)
         dd_curve_pct = dd_stats['dd_series_pct']
         dd_curves[name] = dd_curve_pct
         metrics = compute_global_metrics(
@@ -57,7 +68,7 @@ def render_comparison_dashboard():
                 dd_from_curve,
             )
 
-        metrics_data.append({
+        row = {
             'Configuración': name,
             'Ganancia Neta Total ($)': metrics.get('Ganancia Neta Total ($)', 0),
             'Ganancia Neta Total (%)': metrics.get('Ganancia Neta Total (%)', 0),
@@ -65,7 +76,10 @@ def render_comparison_dashboard():
             'Profit Factor': metrics.get('Profit Factor', 0),
             'Max Drawdown (%)': mdd,
             'Trades Totales': metrics.get('Trades Totales', 0)
-        })
+        }
+        if DEBUG_DD_COMPARE:
+            assert_dd_row_consistency(eq_series, row['Max Drawdown (%)'])
+        metrics_data.append(row)
 
     df_metrics = pd.DataFrame(metrics_data).set_index('Configuración')
     st.session_state.metrics = df_metrics
@@ -85,18 +99,9 @@ def render_comparison_dashboard():
     colors = ['#5DADE2', '#F5B041', '#58D68D', '#EC7063', '#AF7AC5', '#48C9B0']
 
     # Se itera sobre los items para tener acceso al nombre y al color.
-    for i, (name, results) in enumerate(comparison_results.items()):
-        equity_df = results['equity'].copy()
-        equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
-        equity_df = equity_df.set_index('time')
-        
-        if equity_df.index.duplicated().any():
-            equity_df = equity_df[~equity_df.index.duplicated(keep='last')]
-        
-        equity_df = equity_df.resample('D').last().ffill()
-        
+    for i, (name, equity_df) in enumerate(equity_dfs.items()):
         fig.add_trace(go.Scatter(
-            x=equity_df.index, 
+            x=equity_df.index,
             y=equity_df['equity'],
             mode='lines',
             name=name, # El nombre en la leyenda es la clave del diccionario
