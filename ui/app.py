@@ -162,13 +162,20 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
     last_day_closing_equity = st.session_state.ui_initial_capital
 
     dm = st.session_state.data_manager
+    sec_type = st.session_state.ui_sec_type
+    market_type = (
+        "forex" if sec_type == "FOREX" else
+        "crypto" if sec_type == "CRYPTO" else
+        "stocks"
+    )
     for date in unique_dates:
         date_obj = date.date()
         df_prev, df_pm = dm.get_levels_data(
-            target_date=date_obj, symbol=st.session_state.ui_symbol, 
-            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
-            primary_exchange=st.session_state.ui_primary_exchange
+            target_date=date_obj, symbol=st.session_state.ui_symbol,
+            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+            primary_exchange=st.session_state.ui_primary_exchange,
+            market=market_type,
         )
         levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         df_day = df_enriched[df_enriched.index.date == date_obj]
@@ -190,7 +197,6 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
         df_combined_for_day = pd.concat([df_lookback, df_day])
         day_start_index = len(df_lookback)
 
-        market_type = "forex" if st.session_state.ui_sec_type == "FOREX" else "stocks"
         trades, equity_hist_array = run_fast_backtest_exact(
             df_day_with_context=df_combined_for_day,
             day_start_index=day_start_index,
@@ -200,8 +206,8 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
             initial_capital=current_capital,
             commission_per_side=config.COMMISSION_PER_TRADE,
             leverage=float(st.session_state.ui_leverage),
-             market=market_type,
-             symbol=st.session_state.ui_symbol,
+            market=market_type,
+            symbol=st.session_state.ui_symbol,
             stop_after_first_win=True,
             first_trade_loss_stop=first_trade_loss_stop_amount,
             max_trades_per_day=2,
@@ -445,7 +451,11 @@ def process_loading_state_visual():
     try:
         lookback_days = datetime.timedelta(days=30)
         adjusted_download_start = st.session_state.ui_download_start - lookback_days
-        
+        market_key = (
+            "crypto" if st.session_state.ui_market == "Cryptomonedas"
+            else st.session_state.ui_market
+        )
+
         with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
             st.session_state.all_data_utc = dm.get_main_data(
                 symbol=st.session_state.ui_symbol, timeframe=st.session_state.ui_timeframe,
@@ -454,7 +464,8 @@ def process_loading_state_visual():
                 what_to_show=st.session_state.ui_what_to_show,
                 download_start_date=adjusted_download_start,
                 download_end_date=st.session_state.ui_download_end,
-                use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange
+                use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange,
+                market=market_key,
             )
         if st.session_state.all_data_utc.empty: st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
         st.session_state.app_fsm.transition_to(AppState.READY)
@@ -471,11 +482,16 @@ def process_and_prepare_daily_data_visual():
             st.session_state.app_fsm.transition_to(AppState.ERROR)
             return
         try:
+            market_key = (
+                "crypto" if st.session_state.ui_market == "Cryptomonedas"
+                else st.session_state.ui_market
+            )
             df_prev, df_pm = dm.get_levels_data(
-                target_date=date_to_replay, symbol=st.session_state.ui_symbol, 
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange, 
-                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache, 
-                primary_exchange=st.session_state.ui_primary_exchange
+                target_date=date_to_replay, symbol=st.session_state.ui_symbol,
+                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+                primary_exchange=st.session_state.ui_primary_exchange,
+                market=market_key,
             )
             st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         finally:

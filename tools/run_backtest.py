@@ -28,8 +28,18 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
     today = dt.date.today()
     start_date = today - dt.timedelta(days=limit_days)
 
-    sec_type = "STK" if market == "stocks" else "FOREX"
-    exchange = config.DEFAULT_EXCHANGE if market == "stocks" else "IDEALPRO"
+    if market == "stocks":
+        sec_type = "STK"
+        exchange = config.DEFAULT_EXCHANGE
+    elif market == "forex":
+        sec_type = "FOREX"
+        exchange = "IDEALPRO"
+    elif market == "crypto":
+        sec_type = "CRYPTO"
+        exchange = getattr(config, "IB_CRYPTO_EXCHANGE", "PAXOS")
+    else:
+        sec_type = "STK"
+        exchange = config.DEFAULT_EXCHANGE
     currency = config.DEFAULT_CURRENCY
 
     df_exec = dm.get_main_data(
@@ -43,6 +53,7 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
         download_start_date=start_date,
         download_end_date=today,
         use_cache=True,
+        market=market,
     )
     if df_exec is None or df_exec.empty:
         output = {"metrics": {}, "trades": []}
@@ -67,6 +78,7 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
             exchange=exchange,
             currency=currency,
             use_cache=True,
+            market=market,
         )
         levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         df_day = df_enriched[df_enriched.index.date == date_obj]
@@ -100,6 +112,8 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
             stop_after_first_win=True,
             first_trade_loss_stop=first_trade_loss_stop,
             max_trades_per_day=2,
+            market=market,
+            symbol=symbol,
         )
 
         if trades.shape[0] > 0:
