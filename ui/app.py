@@ -36,6 +36,8 @@ from agent_core.execution import ExecutionSimulator, TradeState
 from agent_core.utils.metrics import compute_global_metrics
 from shared.metrics import drawdown_stats
 from shared.timezone_handler import TimezoneHandler, apply_timezone_fixes
+from shared.liquidity_profiles import LIQUIDITY_PROFILES
+from shared.liquidity_stamper import stamp_liquidity_window
 from shared.fsm import FSM, AppState
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
 
@@ -112,9 +114,10 @@ def initialize_session_state():
     st.session_state.ui_use_rth = config.USE_RTH
     st.session_state.ui_what_to_show = config.WHAT_TO_SHOW
     st.session_state.ui_use_cache = config.ENABLE_CACHING
-    
+
     st.session_state.ui_first_trade_loss_stop_pct = 6.0
-    
+    st.session_state.or_window = 'us_equity_open'
+
     st.session_state.data_manager = DataManager()
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     st.session_state.tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
@@ -179,15 +182,21 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
         )
         levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         df_day = df_enriched[df_enriched.index.date == date_obj]
-        if df_day.empty: continue
+        if df_day.empty:
+            continue
 
         try:
-            or_start_time = tz_handler.market_open_time
-            or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
-            or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
-            or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
+            df_day = stamp_liquidity_window(
+                df_day,
+                market_type,
+                st.session_state.get("or_window"),
+            )
+            or_candles = df_day[df_day["in_opening_window"]]
             if not or_candles.empty:
-                levels['ORH'], levels['ORL'] = or_candles['high'].max(), or_candles['low'].min()
+                levels["ORH"], levels["ORL"] = (
+                    or_candles["high"].max(),
+                    or_candles["low"].min(),
+                )
         except Exception as e:
             logger.warning(f"No se pudo calcular ORH/ORL para {date_obj}: {e}")
 
@@ -607,11 +616,13 @@ def handle_market_change():
         st.session_state.ui_exchange = config.FOREX_EXCHANGES[0]
         st.session_state.ui_primary_exchange = ""
         st.session_state.ui_sec_type = "FOREX"
+        st.session_state.or_window = 'london_open'
     elif market == "Cryptomonedas":
         st.session_state.ui_symbol = DEFAULT_CRYPTO
         st.session_state.ui_exchange = IB_CRYPTO_EXCHANGE
         st.session_state.ui_primary_exchange = ""
         st.session_state.ui_sec_type = "CRYPTO"
+        st.session_state.or_window = 'us_equity_open'
     else:
         st.session_state.ui_symbol = config.STOCK_SYMBOLS_LIST[0]
         st.session_state.ui_exchange = config.STOCKS_EXCHANGES[0]
@@ -619,6 +630,7 @@ def handle_market_change():
             config.STOCKS_PRIMARY_EXCHANGES[0] if config.STOCKS_PRIMARY_EXCHANGES else ""
         )
         st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
+        st.session_state.or_window = 'us_equity_open'
 
     exec_options = get_exec_timeframe_options(market)
     if st.session_state.ui_exec_timeframe not in exec_options:
@@ -639,6 +651,23 @@ with st.sidebar:
         if st.session_state.ui_market not in market_options:
             st.session_state.ui_market = "stocks"
         st.selectbox("Mercado", options=market_options, key="ui_market", on_change=handle_market_change)
+
+        market_key = st.session_state.ui_market.lower()
+        if market_key == "cryptomonedas":
+            market_key = "crypto"
+        profiles = LIQUIDITY_PROFILES.get(market_key, {})
+        profile_keys = list(profiles.keys()) if profiles else ["us_equity_open"]
+        default_by_mkt = {"stocks": "us_equity_open", "forex": "london_open", "crypto": "us_equity_open"}
+        current_key = st.session_state.get("or_window", default_by_mkt.get(market_key, "us_equity_open"))
+        if current_key not in profile_keys:
+            current_key = default_by_mkt.get(market_key, profile_keys[0])
+        or_window = st.selectbox(
+            "Ventana de liquidez (OR)",
+            profile_keys,
+            index=profile_keys.index(current_key) if current_key in profile_keys else 0,
+            key="or_window",
+        )
+        st.session_state["or_window"] = or_window
 
         if st.session_state.ui_market == "forex":
             symbol_options = config.FOREX_SYMBOLS
