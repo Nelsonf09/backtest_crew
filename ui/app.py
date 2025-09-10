@@ -327,6 +327,7 @@ def process_global_backtesting():
     tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
 
     market = st.session_state.ui_market
+    market_key = ("crypto" if market == "Cryptomonedas" else market)
     if market == "forex" and st.session_state.ui_primary_exchange:
         st.info("Primary Exchange no aplica en Forex y será ignorado.")
         st.session_state.ui_primary_exchange = ""
@@ -379,7 +380,7 @@ def process_global_backtesting():
                 if df_exec_raw.empty:
                     logger.warning(f"No hay datos de ejecución, saltando timeframe {tf_label}.")
                     continue
-                df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+                df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw, market=market_key, or_window=st.session_state.get('or_window'))
                 df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
 
                 trades, equity = run_single_backtest_iteration(df_enriched_local, tz_handler, fixed_ema_filter_mode)
@@ -406,7 +407,7 @@ def process_global_backtesting():
             if df_exec_raw.empty:
                 st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
 
-            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw, market=market_key, or_window=st.session_state.get('or_window'))
             df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
 
             for i, mode in enumerate(filter_modes_to_compare):
@@ -436,7 +437,7 @@ def process_global_backtesting():
             if df_exec_raw.empty:
                 st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
 
-            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw)
+            df_enriched = add_technical_indicators(df_exec_raw, df_filter_raw, market=market_key, or_window=st.session_state.get('or_window'))
             df_enriched_local = df_enriched.tz_convert(tz_handler.display_tz)
             
             st.session_state.session_trades, st.session_state.global_equity_history = run_single_backtest_iteration(
@@ -482,7 +483,8 @@ def process_loading_state_visual():
 
 def process_and_prepare_daily_data_visual():
     date_to_replay = st.session_state.ui_replay_start_date
-    handle_signal_request(None, None, reset_strategy=True)
+    market_key = ("crypto" if st.session_state.ui_market == "Cryptomonedas" else st.session_state.ui_market)
+    handle_signal_request(None, None, reset_strategy=True, or_window=st.session_state.get('or_window'), market=market_key)
     dm = st.session_state.data_manager
     
     with st.spinner("Obteniendo niveles del día..."):
@@ -514,7 +516,7 @@ def process_and_prepare_daily_data_visual():
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
 
     df_full_day_utc = pd.concat([df_context_utc, df_replay_utc])
-    df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50])
+    df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
     
     df_context_enriched = df_enriched.loc[df_context_utc.index]
     df_replay_enriched = df_enriched.loc[df_replay_utc.index]
@@ -849,7 +851,9 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
             historical_data=df_hist_context, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
             ema_filter_mode=ema_filter,
-            daily_candle_index=idx
+            daily_candle_index=idx,
+            or_window=st.session_state.get('or_window'),
+            market=("crypto" if st.session_state.ui_market == "Cryptomonedas" else st.session_state.ui_market)
         )
         
         result = executor.process_signal(signal, current_candle)

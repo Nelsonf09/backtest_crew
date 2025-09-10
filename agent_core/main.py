@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import numpy as np
 import logging
+from shared.liquidity_stamper import stamp_liquidity_window
 
 from strategies.opening_br_strategy import OpeningBreakRetestStrategy
 
@@ -61,7 +62,7 @@ deterministic_crew = Crew(
     verbose=True
 )
 
-def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict, reset_strategy: bool = False, ema_filter_mode: str = "Desactivado", daily_candle_index: int = -1) -> str | dict:
+def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict, reset_strategy: bool = False, ema_filter_mode: str = "Desactivado", daily_candle_index: int = -1, *, or_window: str | None = None, market: str | None = None) -> str | dict:
     """
     Función principal que recibe la solicitud, actualiza la estrategia y obtiene la señal.
     """
@@ -71,6 +72,9 @@ def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict, r
 
     if historical_data is None or historical_data.empty:
         return 'HOLD'
+
+    if ('in_opening_window' not in historical_data.columns) or or_window:
+        historical_data = stamp_liquidity_window(historical_data, market or 'stocks', or_window)
 
     obr_strategy.ema_filter_mode = ema_filter_mode.capitalize()
     obr_strategy.use_ema_filter = obr_strategy.ema_filter_mode != 'Desactivado'
