@@ -36,6 +36,14 @@ def add_technical_indicators(
     # Estampar ventana de liquidez si aún no existe o si se especifica una nueva ventana
     if ('in_opening_window' not in df_exec.columns) or or_window:
         df_exec = stamp_liquidity_window(df_exec, market or '', or_window)
+        # Estampar misma ventana OR en df_filter (si existe)
+        try:
+            if df_filter is not None and (('in_opening_window' not in df_filter.columns) or or_window):
+                df_filter = stamp_liquidity_window(df_filter, market or '', or_window)
+        except Exception as _e:
+            logger.warning(f'No se pudo estampar OR en df_filter: {type(_e).__name__}: {_e}')
+
+
 
     df_to_enrich = df_exec.copy()
 
@@ -64,17 +72,20 @@ def add_technical_indicators(
         df_result = df_with_gaps.groupby(df_with_gaps.index.date).ffill()
     else:
         df_result = df_with_gaps
+    df_result.attrs = df_exec.attrs
 
     logger.info("DataFrame enriquecido con indicadores técnicos (corrección anti-fuga aplicada).")
 
     # Log de diagnóstico de la ventana de liquidez
     try:
-        meta = df_exec.attrs.get('liquidity_window', {})
-        logger.info(
-            f"DIAG-LIQ: market={meta.get('market')} "
-            f"key={meta.get('window_key')} tz={meta.get('tz')} "
-            f"start={meta.get('start')} minutes={meta.get('minutes')}"
+        meta = df_result.attrs.get('liquidity_window', {}) if hasattr(df_result, 'attrs') else {}
+        or_exec = int(df_result['in_opening_window'].sum()) if 'in_opening_window' in df_result.columns else -1
+        or_filt = (
+            int(df_filter['in_opening_window'].sum())
+            if (df_filter is not None and 'in_opening_window' in getattr(df_filter, 'columns', []))
+            else -1
         )
+        logger.info(f"DIAG-LIQ: market={meta.get('market')} key={meta.get('window_key')} tz={meta.get('tz')} start={meta.get('start')} minutes={meta.get('minutes')} | OR exec={or_exec}, OR filt={or_filt}")
     except Exception:
         pass
 
