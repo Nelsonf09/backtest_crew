@@ -5,7 +5,6 @@ Archivo de configuración central para el Scalping Backtester.
 
 import os
 from pathlib import Path
-import types, sys
 
 # --- Configuración de Conexión a Interactive Brokers ---
 IB_HOST = '127.0.0.1' # Host de TWS o IB Gateway
@@ -64,9 +63,3 @@ INITIAL_CAPITAL = 1000.0
 COMMISSION_PER_TRADE = 0.85
 SLIPPAGE_POINTS = 0.0
 DEFAULT_LEVERAGE = 5
-
-# --- Crypto symbols submodule ---
-crypto_symbols = types.ModuleType("config.crypto_symbols")
-crypto_symbols.CRYPTO_SYMBOLS = ['BTC-USD', 'ETH-USD']
-crypto_symbols.DEFAULT_CRYPTO_SYMBOL = crypto_symbols.CRYPTO_SYMBOLS[0]
-sys.modules[__name__ + ".crypto_symbols"] = crypto_symbols
