@@ -3,6 +3,8 @@
 Módulo DataManager refactorizado para usar una FSM que gestione el estado de la conexión a IB.
 Esto mejora la robustez y previene intentos de descarga de datos cuando no hay una conexión activa.
 """
+import os
+import threading
 import logging
 from pathlib import Path
 import pandas as pd
@@ -11,7 +13,7 @@ from ib_insync import IB, util, Contract, Forex, Stock, Future, Index
 import config
 import pytz
 import math
-import time # <-- IMPORTACIÓN AÑADIDA
+import time  # <-- IMPORTACIÓN AÑADIDA
 
 from .ib_crypto_support import build_crypto_contract
 from shared.fsm import FSM, ConnectionState # <-- IMPORTAMOS LA FSM
@@ -31,6 +33,7 @@ def calculate_ib_duration(start_date: datetime.date, end_date: datetime.date) ->
 
 class DataManager:
     """ Gestiona conexión IB (con FSM), datos históricos, caché y niveles clave. """
+    _CONNECT_LOCK = threading.Lock()
     def __init__(self):
         self.ib = None
         self.config = config
@@ -58,8 +61,19 @@ class DataManager:
             return 'AGGTRADES', 0
         return what_to_show, use_rth
 
-    def connect_ib(self):
-        """Conecta a IB usando la FSM para gestionar el estado."""
+    def connect_ib(
+        self,
+        host: str = '127.0.0.1',
+        port: int = 7497,
+        client_id: int | None = None,
+        timeout: int = 60,
+        retries: int = 2,
+    ) -> bool:
+        """Conecta a IB de forma robusta.
+        - Idempotente: si ya está conectado, no reconecta.
+        - clientId: usa IB_CLIENT_ID si existe; si no, asigna por mercado (stocks=1001, forex=1002, crypto=1003) con fallback 1000.
+        - timeout=60s por defecto; reintenta con backoff.
+        """
         if self.connection_fsm.is_in_state(ConnectionState.CONNECTED):
             logger.debug("Ya conectado a IB.")
             return True
@@ -67,41 +81,102 @@ class DataManager:
             logger.warning("Conexión ya en progreso.")
             return False
 
-        self.connection_fsm.transition_to(ConnectionState.CONNECTING)
-        try:
-            self.ib = IB()
-            host = getattr(self.config, 'IB_HOST', '127.0.0.1')
-            port = getattr(self.config, 'IB_PORT', 7497)
-            client_id = getattr(self.config, 'IB_CLIENT_ID', 1)
-            
-            try: self.ib.errorEvent -= self._handle_ib_error
-            except Exception: pass
-            self.ib.errorEvent += self._handle_ib_error
-
-            self.ib.connect(host, port, clientId=client_id, timeout=15)
-            if self.ib.isConnected():
-                self.connection_fsm.transition_to(ConnectionState.CONNECTED)
-                logger.info(f"Conexión IB OK. ServerTime: {self.ib.reqCurrentTime()}")
-                return True
+        mkt = (getattr(self, 'market', None) or '').lower()
+        if client_id is None:
+            env_id = os.getenv('IB_CLIENT_ID')
+            if env_id and env_id.isdigit():
+                client_id = int(env_id)
             else:
+                client_id = {'stocks': 1001, 'forex': 1002, 'crypto': 1003}.get(mkt, 1000)
+
+        with self._CONNECT_LOCK:
+            try:
+                if getattr(self, 'ib', None) is None:
+                    self.ib = IB()
+                    try:
+                        self.ib.errorEvent -= self._handle_ib_error
+                    except Exception:
+                        pass
+                    self.ib.errorEvent += self._handle_ib_error
+
+                if self.ib.isConnected():
+                    logger.info(
+                        "IB ya conectado (clientId=%s). Reusando sesión.",
+                        getattr(self.ib, 'clientId', 'n/a'),
+                    )
+                    self.connection_fsm.transition_to(ConnectionState.CONNECTED)
+                    return True
+            except Exception:
+                pass
+
+            last_err = None
+            _timeout = int(timeout)
+            for attempt in range(0, max(1, int(retries) + 1)):
+                try:
+                    logger.info(
+                        'Conectando IB host=%s port=%s clientId=%s timeout=%ss (intento %s)',
+                        host,
+                        port,
+                        client_id,
+                        _timeout,
+                        attempt + 1,
+                    )
+                    self.connection_fsm.transition_to(ConnectionState.CONNECTING)
+                    self.ib.connect(host, port, clientId=client_id, timeout=_timeout)
+                    if self.ib.isConnected():
+                        self.connection_fsm.transition_to(ConnectionState.CONNECTED)
+                        try:
+                            _ = self.ib.reqCurrentTime()
+                        except Exception as ping_e:
+                            logger.warning('Ping reqCurrentTime falló: %s', ping_e)
+                        logger.info(
+                            'Conexión IB OK. ServerTime: %s',
+                            getattr(self.ib, 'serverTime', None),
+                        )
+                        return True
+                    else:
+                        last_err = RuntimeError('Fallo conexión IB (isConnected() es False).')
+                        self.connection_fsm.transition_to(ConnectionState.ERROR)
+                except TimeoutError as e:
+                    last_err = e
+                    logger.error(
+                        'Timeout conectando a IB (t=%ss, intento %s/%s).',
+                        _timeout,
+                        attempt + 1,
+                        retries + 1,
+                    )
+                    self.connection_fsm.transition_to(ConnectionState.ERROR)
+                except Exception as e:
+                    last_err = e
+                    logger.error('Error conectando a IB: %s', e)
+                    self.connection_fsm.transition_to(ConnectionState.ERROR)
+
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    _timeout = min(90, int(_timeout * 3 // 2))
+                else:
+                    break
+
+            if last_err:
+                logger.error('Conexión IB fallida tras reintentos: %s', last_err)
                 self.connection_fsm.transition_to(ConnectionState.ERROR)
-                logger.error("Fallo conexión IB (isConnected() es False).")
                 return False
-        except Exception as e:
-            self.connection_fsm.transition_to(ConnectionState.ERROR)
-            logger.error(f"Error genérico conexión IB: {e}", exc_info=True)
             return False
 
     def disconnect_ib(self):
-        """Desconecta de IB usando la FSM."""
+        """Desconecta de IB de forma idempotente."""
         if self.connection_fsm.is_in_state(ConnectionState.DISCONNECTED):
             return
-        
-        self.connection_fsm.transition_to(ConnectionState.DISCONNECTING)
-        if self.ib and self.ib.isConnected():
-            self.ib.disconnect()
-        self.connection_fsm.transition_to(ConnectionState.DISCONNECTED)
-        logger.info("Desconexión IB OK.")
+        try:
+            with self._CONNECT_LOCK:
+                if self.ib and self.ib.isConnected():
+                    self.ib.disconnect()
+                    logger.info("Desconexión IB OK.")
+                self.connection_fsm.transition_to(ConnectionState.DISCONNECTED)
+        except Exception as e:
+            logger.warning('Error al desconectar IB (ignorado): %s', e)
+        finally:
+            return
 
     def _fetch_data_core(self, contract: Contract, end_datetime_str: str, duration_str: str, timeframe: str, rth: bool, what_to_show: str) -> pd.DataFrame:
         """Núcleo de la descarga de datos, protegido por la FSM de conexión."""
