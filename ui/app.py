@@ -24,7 +24,7 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 import config
-from config.crypto_symbols import CRYPTO_SYMBOLS, DEFAULT_CRYPTO, IB_CRYPTO_EXCHANGE
+from config import CRYPTO_SYMBOLS, DEFAULT_CRYPTO, IB_CRYPTO_EXCHANGE
 from agent_core.main import handle_signal_request
 from agent_core.data_manager import DataManager
 from agent_core.technical_analyzer import add_technical_indicators
