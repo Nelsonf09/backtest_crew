@@ -244,19 +244,12 @@ class DataManager:
         return {'PMH': pmh if pd.notna(pmh) else None, 'PML': pml if pd.notna(pml) else None}
 
     def get_main_data(self, symbol: str, timeframe: str, sec_type: str, exchange: str, currency: str, rth: bool, what_to_show: str,
-                      download_start_date: datetime.date, download_end_date: datetime.date,
-                      use_cache=True, market: str | None = None, **kwargs) -> pd.DataFrame:
+                      download_start_date: datetime.date, download_end_date: datetime.date, 
+                      use_cache=True, **kwargs) -> pd.DataFrame:
         
         # --- INICIO DE LA LÓGICA DE CACHÉ INTELIGENTE Y DESCARGA POR FRAGMENTOS ---
         
-        market = market or kwargs.pop('market', None)
-        if market == 'crypto':
-            from agent_core.ib_crypto_support import build_crypto_contract
-            contract = build_crypto_contract(symbol)
-            rth = False
-            what_to_show = 'TRADES'
-        else:
-            contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
+        contract = self._resolve_contract(symbol, sec_type, exchange, currency, **kwargs)
         all_dfs = []
         current_start = download_start_date
         
