@@ -116,7 +116,6 @@ def initialize_session_state():
     st.session_state.ui_use_cache = config.ENABLE_CACHING
 
     st.session_state.ui_first_trade_loss_stop_pct = 6.0
-    st.session_state.or_window = 'us_equity_open'
 
     st.session_state.data_manager = DataManager()
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
@@ -618,13 +617,11 @@ def handle_market_change():
         st.session_state.ui_exchange = config.FOREX_EXCHANGES[0]
         st.session_state.ui_primary_exchange = ""
         st.session_state.ui_sec_type = "FOREX"
-        st.session_state.or_window = 'london_open'
     elif market == "Cryptomonedas":
         st.session_state.ui_symbol = DEFAULT_CRYPTO
         st.session_state.ui_exchange = IB_CRYPTO_EXCHANGE
         st.session_state.ui_primary_exchange = ""
         st.session_state.ui_sec_type = "CRYPTO"
-        st.session_state.or_window = 'us_equity_open'
     else:
         st.session_state.ui_symbol = config.STOCK_SYMBOLS_LIST[0]
         st.session_state.ui_exchange = config.STOCKS_EXCHANGES[0]
@@ -632,7 +629,6 @@ def handle_market_change():
             config.STOCKS_PRIMARY_EXCHANGES[0] if config.STOCKS_PRIMARY_EXCHANGES else ""
         )
         st.session_state.ui_sec_type = config.DEFAULT_SEC_TYPE
-        st.session_state.or_window = 'us_equity_open'
 
     exec_options = get_exec_timeframe_options(market)
     if st.session_state.ui_exec_timeframe not in exec_options:
@@ -657,16 +653,24 @@ with st.sidebar:
         market_key = st.session_state.ui_market.lower()
         if market_key == "cryptomonedas":
             market_key = "crypto"
-        profiles = LIQUIDITY_PROFILES.get(market_key, {})
-        profile_keys = list(profiles.keys()) if profiles else ["us_equity_open"]
-        default_by_mkt = {"stocks": "us_equity_open", "forex": "london_open", "crypto": "us_equity_open"}
-        current_key = st.session_state.get("or_window", default_by_mkt.get(market_key, "us_equity_open"))
-        if current_key not in profile_keys:
-            current_key = default_by_mkt.get(market_key, profile_keys[0])
+
+        # --- OR window init/reset (antes del selectbox) ---
+        from shared.liquidity_profiles import LIQUIDITY_PROFILES
+        _mkt = market_key
+        if st.session_state.get('last_market') != _mkt:
+            st.session_state.pop('or_window', None)
+            st.session_state['last_market'] = _mkt
+        _profiles = LIQUIDITY_PROFILES.get(_mkt, {})
+        _keys = list(_profiles.keys()) if _profiles else ['us_equity_open']
+        _default_by_mkt = {'stocks':'us_equity_open','forex':'london_open','crypto':'us_equity_open'}
+        _default = _default_by_mkt.get(_mkt, _keys[0])
+        if 'or_window' not in st.session_state or st.session_state['or_window'] not in _keys:
+            st.session_state['or_window'] = _default
+
         or_window = st.selectbox(
             "Ventana de liquidez (OR)",
-            profile_keys,
-            index=profile_keys.index(current_key) if current_key in profile_keys else 0,
+            _keys,
+            index=_keys.index(st.session_state['or_window']) if st.session_state['or_window'] in _keys else 0,
             key="or_window",
         )
 
