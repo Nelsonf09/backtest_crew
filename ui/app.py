@@ -669,7 +669,6 @@ with st.sidebar:
             index=profile_keys.index(current_key) if current_key in profile_keys else 0,
             key="or_window",
         )
-        st.session_state["or_window"] = or_window
 
         if st.session_state.ui_market == "forex":
             symbol_options = config.FOREX_SYMBOLS
