@@ -3,13 +3,21 @@
 Aplicación Streamlit para el Backtesting Player Visual.
 """
 import nest_asyncio
+import streamlit as st
+
+
+# --- DataManager singleton cacheado para evitar reconexiones por re-runs ---
+@st.cache_resource(show_spinner=False)
+def get_dm():
+    from agent_core.data_manager import DataManager
+    return DataManager()
+
 nest_asyncio.apply()
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)-7s - %(name)-25s:%(lineno)3d - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
-import streamlit as st
 import pandas as pd
 import numpy as np
 import time
@@ -117,7 +125,7 @@ def initialize_session_state():
 
     st.session_state.ui_first_trade_loss_stop_pct = 6.0
 
-    st.session_state.data_manager = DataManager()
+    st.session_state.data_manager = get_dm()
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
     st.session_state.tz_handler = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
 
