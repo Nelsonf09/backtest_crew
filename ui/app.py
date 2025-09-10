@@ -679,13 +679,20 @@ with st.sidebar:
         st.text_input("Moneda", key="ui_currency")
         st.date_input("Inicio Descarga", key="ui_download_start")
         st.date_input("Fin Descarga", key="ui_download_end")
+        if st.session_state.ui_market == "Cryptomonedas":
+            st.session_state.ui_use_rth = False
         st.toggle("Usar solo RTH", key="ui_use_rth")
         st.session_state.ui_what_to_show = st.session_state.get(
             "ui_what_to_show", config.WHAT_TO_SHOW
         )
+        fuente_options = ['TRADES', 'MIDPOINT', 'BID', 'ASK']
+        if st.session_state.ui_market == "Cryptomonedas":
+            fuente_options = ['AGGTRADES']
+        if st.session_state.ui_what_to_show not in fuente_options:
+            st.session_state.ui_what_to_show = fuente_options[0]
         st.selectbox(
             "Fuente de Datos Velas",
-            options=['TRADES', 'MIDPOINT', 'BID', 'ASK'],
+            options=fuente_options,
             key="ui_what_to_show",
             help="En Forex se usará MIDPOINT internamente, aunque aquí veas TRADES.",
         )
