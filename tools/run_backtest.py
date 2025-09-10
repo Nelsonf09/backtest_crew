@@ -60,7 +60,7 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
         out_path.write_text(json.dumps(output, indent=2))
         return
 
-    df_enriched = add_technical_indicators(df_exec, df_exec)
+    df_enriched = add_technical_indicators(df_exec, df_exec, market=market)
 
     unique_dates = df_enriched.index.normalize().unique()
     all_trades = []
