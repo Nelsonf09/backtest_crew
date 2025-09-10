@@ -50,6 +50,14 @@ class DataManager:
             if errorCode in {502, 504, 509, 1100, 1101, 1102, 1300, 2109}:
                 self.connection_fsm.transition_to(ConnectionState.ERROR)
 
+    def _normalize_wts_for_market(self, market, what_to_show, use_rth):
+        m = (market or getattr(self, 'market', None) or '').lower()
+        if m in ('crypto', 'cryptomonedas'):
+            if what_to_show and what_to_show != 'AGGTRADES':
+                logger.warning(f"CRYPTO necesita AGGTRADES; se fuerza (antes: {what_to_show})")
+            return 'AGGTRADES', 0
+        return what_to_show, use_rth
+
     def connect_ib(self):
         """Conecta a IB usando la FSM para gestionar el estado."""
         if self.connection_fsm.is_in_state(ConnectionState.CONNECTED):
@@ -192,7 +200,7 @@ class DataManager:
         if market == "forex":
             return False, "MIDPOINT"
         if market == "crypto":
-            return False, "TRADES"
+            return False, what_to_show
         return rth, what_to_show
 
     def _get_chunk_params(self, market: str, timeframe: str) -> tuple[int, str, float]:
@@ -240,7 +248,8 @@ class DataManager:
                 contract_obj = self._resolve_contract(symbol, sec_type, exchange, currency, **contract_kwargs)
             end_dt_prev_day_market = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time(23, 59, 59)))
             end_dt_prev_day_utc_str = end_dt_prev_day_market.astimezone(self.UTC_TZ).strftime('%Y%m%d %H:%M:%S %Z')
-            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, rth_prev_day, what_to_show)
+            wts_pd, rth_pd = self._normalize_wts_for_market(market, what_to_show, rth_prev_day)
+            df_fetched_pd = self._fetch_data_core(contract_obj, end_dt_prev_day_utc_str, '1 D', timeframe_daily, rth_pd, wts_pd)
             if df_fetched_pd is not None and not df_fetched_pd.empty:
                 start_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.min)).astimezone(self.UTC_TZ)
                 end_utc = self.MARKET_TZ.localize(datetime.datetime.combine(prev_business_day, datetime.time.max)).astimezone(self.UTC_TZ)
@@ -296,8 +305,9 @@ class DataManager:
         df_chunk = pd.DataFrame()
 
         for _ in range(max_retries):
+            what_to_show_use, rth_use = self._normalize_wts_for_market(market, what_to_show, rth)
             df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk,
-                                             timeframe, rth, what_to_show)
+                                             timeframe, rth_use, what_to_show_use)
             if df_chunk is not None and not df_chunk.empty:
                 return df_chunk
             time.sleep(retry_pause)
@@ -305,8 +315,9 @@ class DataManager:
         if market == "forex" and what_to_show == "MIDPOINT":
             logger.warning("MIDPOINT vacío tras reintentos, probando BID_ASK.")
             for _ in range(max_retries):
+                what_to_show_use, rth_use = self._normalize_wts_for_market(market, "BID_ASK", rth)
                 df_chunk = self._fetch_data_core(contract, end_dt_utc_req_chunk, duration_req_chunk,
-                                                 timeframe, rth, "BID_ASK")
+                                                 timeframe, rth_use, what_to_show_use)
                 if df_chunk is not None and not df_chunk.empty:
                     return df_chunk
                 time.sleep(retry_pause)
