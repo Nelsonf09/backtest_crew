@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backtest-crew"
+version = "0.1.0"
+description = "UI Streamlit + estrategia B&R + conectores IB para backtests"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "streamlit>=1.32",
+  "ib-insync>=0.9.86",
+  "httpx>=0.27",
+  "pytz>=2024.1",
+  "rich>=13.7"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+# Incluimos los paquetes principales del repo (ajusta si fuera necesario)
+include = ["agent_core*", "shared*", "ui*", "config*"]
+
+[project.optional-dependencies]
+# extras opcionales por si luego separas
+crypto = []
