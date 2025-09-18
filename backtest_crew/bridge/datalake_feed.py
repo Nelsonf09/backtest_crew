@@ -124,7 +124,8 @@ class DatalakeFeed:
             return df
         start_ts = pd.to_datetime(start, utc=True) if start else None
         end_ts = pd.to_datetime(end, utc=True) if end else None
-        mask = pd.Series([True] * len(df))
+        # Usamos un array boolean alineado al índice para evitar problemas de indexación
+        mask = pd.Series(True, index=df.index)
         if start_ts is not None:
             mask &= df['ts'] >= start_ts
         if end_ts is not None:
