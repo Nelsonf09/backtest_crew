@@ -5,6 +5,7 @@ import datetime as dt
 import json
 from pathlib import Path
 import sys
+import os
 
 import pandas as pd
 
@@ -20,8 +21,16 @@ from shared.timezone_handler import TimezoneHandler
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
 from agent_core.utils.metrics import compute_global_metrics
 
+# Bridge opcional
+try:
+    from backtest_crew.bridge import BridgeConfig, DatalakeFeed  # type: ignore
+except Exception:  # pragma: no cover
+    BridgeConfig = None  # type: ignore
+    DatalakeFeed = None  # type: ignore
 
-def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_path: Path) -> None:
+
+def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_path: Path,
+                 use_datalake: bool = False, lake_kwargs: dict | None = None) -> None:
     dm = DataManager()
     tz_handler = TimezoneHandler()
 
@@ -42,19 +51,54 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
         exchange = config.DEFAULT_EXCHANGE
     currency = config.DEFAULT_CURRENCY
 
-    df_exec = dm.get_main_data(
-        symbol=symbol,
-        timeframe=timeframe,
-        sec_type=sec_type,
-        exchange=exchange,
-        currency=currency,
-        rth=config.USE_RTH,
-        what_to_show=config.WHAT_TO_SHOW,
-        download_start_date=start_date,
-        download_end_date=today,
-        use_cache=True,
-        market=market,
-    )
+    if use_datalake and DatalakeFeed and BridgeConfig and lake_kwargs:
+        # Interpretamos timeframe IB -> tf datalake si es posible (simple mapping de minutos).
+        tf_map = {"1 min": "M1", "5 mins": "M5", "15 mins": "M15", "30 mins": "M30"}
+        dl_tf = tf_map.get(timeframe.lower(), "M1")
+        # Determinamos rango: si se pasa 'date' en lake_kwargs se convierte en from/to.
+        if 'date' in lake_kwargs and lake_kwargs['date']:
+            date_str = lake_kwargs.pop('date')
+            base_date = dt.datetime.fromisoformat(date_str).date()
+            date_from = f"{base_date.isoformat()}T00:00:00Z"
+            date_to = f"{(base_date + dt.timedelta(days=1)).isoformat()}T00:00:00Z"
+            lake_kwargs['date_from'] = date_from
+            lake_kwargs['date_to'] = date_to
+        cfg = BridgeConfig(
+            lake_root=lake_kwargs.get('lake_root') or os.getenv('LAKE_ROOT', ''),
+            source=lake_kwargs.get('source', 'binance'),
+            symbol=lake_kwargs.get('symbol', symbol),
+            tf=lake_kwargs.get('tf', dl_tf),
+            date_from=lake_kwargs.get('date_from'),
+            date_to=lake_kwargs.get('date_to'),
+            mode=lake_kwargs.get('mode', 'bulk'),
+            speed_bps=float(lake_kwargs.get('speed_bps', 0.0)),
+            rename_ts_to=lake_kwargs.get('rename_ts_to'),
+        )
+        feed = DatalakeFeed()
+        df_exec = feed.load_df(cfg)
+        if df_exec is not None and not df_exec.empty:
+            # Re-index a DatetimeIndex en UTC si ts es columna.
+            if 'ts' in df_exec.columns:
+                df_exec = df_exec.set_index('ts')
+            if df_exec.index.tz is None:
+                df_exec.index = df_exec.index.tz_localize('UTC')
+            # Adaptamos nombres a los usados por IB path si difieren.
+        else:
+            df_exec = None
+    else:
+        df_exec = dm.get_main_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            sec_type=sec_type,
+            exchange=exchange,
+            currency=currency,
+            rth=config.USE_RTH,
+            what_to_show=config.WHAT_TO_SHOW,
+            download_start_date=start_date,
+            download_end_date=today,
+            use_cache=True,
+            market=market,
+        )
     if df_exec is None or df_exec.empty:
         output = {"metrics": {}, "trades": []}
         out_path.write_text(json.dumps(output, indent=2))
@@ -162,12 +206,36 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run fast backtests")
     parser.add_argument("--engine", default="fast", choices=["fast"], help="Backtest engine")
-    parser.add_argument("--market", default="stocks", choices=["stocks", "forex"], help="Market type")
+    parser.add_argument("--market", default="stocks", choices=["stocks", "forex", "crypto"], help="Market type")
     parser.add_argument("--symbol", required=True, help="Instrument symbol")
     parser.add_argument("--timeframe", default="1 min", help="Timeframe string for IB")
     parser.add_argument("--limit", type=int, default=5, help="Number of past days to download")
     parser.add_argument("--out", default="backtest.json", help="Output JSON file")
+    # Flags opcionales para datalake
+    parser.add_argument("--use-datalake", action="store_true", help="Activar lectura desde Datalake (bulk)")
+    parser.add_argument("--lake-root", help="Root del datalake (fallback LAKE_ROOT)")
+    parser.add_argument("--dl-source", dest="dl_source", default="binance")
+    parser.add_argument("--dl-symbol", dest="dl_symbol", help="Símbolo override para datalake")
+    parser.add_argument("--dl-tf", dest="dl_tf", help="TF datalake (M1/M5/M15/M30)")
+    parser.add_argument("--dl-date", dest="dl_date", help="Día completo UTC (YYYY-MM-DD)")
+    parser.add_argument("--dl-date-from", dest="dl_date_from", help="Inicio rango UTC ISO")
+    parser.add_argument("--dl-date-to", dest="dl_date_to", help="Fin rango UTC ISO (exclusivo)")
+    parser.add_argument("--dl-rename-ts-to", dest="dl_rename_ts_to", help="Renombrar columna ts")
     args = parser.parse_args()
+
+    lake_kwargs = None
+    if args.use_datalake:
+        lake_kwargs = {
+            'lake_root': args.lake_root,
+            'source': args.dl_source,
+            'symbol': args.dl_symbol or args.symbol,
+            'tf': args.dl_tf,
+            'date': args.dl_date,
+            'date_from': args.dl_date_from,
+            'date_to': args.dl_date_to,
+            'rename_ts_to': args.dl_rename_ts_to,
+            'mode': 'bulk',  # Por ahora sólo bulk en este entrypoint
+        }
 
     run_backtest(
         symbol=args.symbol,
@@ -175,6 +243,8 @@ def main() -> None:
         market=args.market,
         limit_days=args.limit,
         out_path=Path(args.out),
+        use_datalake=bool(args.use_datalake),
+        lake_kwargs=lake_kwargs,
     )
 
 
