@@ -85,3 +85,6 @@ playwright/.cache/
 # *.pt
 # *.onnx
 # *.pkl
+
+# Ignore local artifacts
+.tmp/

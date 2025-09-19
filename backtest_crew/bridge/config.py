@@ -24,6 +24,9 @@ class BridgeConfig:
     mode: Literal["bulk", "stream"] = "bulk"  # Cómo consumir los datos
     speed_bps: float = 0.0          # Barras por segundo para modo stream; 0 = sin sleep
     rename_ts_to: Optional[str] = None  # Renombrar columna 'ts' a este nombre (útil para integrar con código existente)
+    # Caché (opcional) para acelerar consultas repetidas
+    use_cache: bool = True
+    cache_ttl_s: int = 600  # 10 minutos por defecto
 
     def as_kwargs(self) -> dict:
         return {
@@ -36,4 +39,6 @@ class BridgeConfig:
             'mode': self.mode,
             'speed_bps': self.speed_bps,
             'rename_ts_to': self.rename_ts_to,
+            'use_cache': self.use_cache,
+            'cache_ttl_s': self.cache_ttl_s,
         }

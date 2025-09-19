@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Iterator
 import pandas as pd
+import time
+from collections import OrderedDict
 
 from .config import BridgeConfig
 
@@ -50,6 +52,24 @@ class DatalakeFeed:
       - Proveer iteración tipo stream (fila a fila) opcional con throttling.
     """
 
+    _cache_results: "OrderedDict[str, tuple[float, pd.DataFrame]]" = OrderedDict()
+    _cache_parts: "OrderedDict[str, tuple[float, pd.DataFrame]]" = OrderedDict()
+    _cache_max_entries: int = 12
+
+    def _make_key(self, cfg: BridgeConfig) -> str:
+        return "|".join([
+            cfg.lake_root or "",
+            cfg.source or "",
+            cfg.symbol or "",
+            cfg.tf or "",
+            str(cfg.date_from or ""),
+            str(cfg.date_to or ""),
+        ])
+
+    def _prune_lru(self, cache: "OrderedDict", max_entries: int):
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
+
     def load_df(self, cfg: BridgeConfig) -> pd.DataFrame:
         if read_range_df is None:
             raise RuntimeError("El módulo datalake.read.api no está disponible en el entorno.")
@@ -66,7 +86,22 @@ class DatalakeFeed:
             cfg.lake_root, cfg.source, cfg.tf, cfg.symbol, cfg.date_from, cfg.date_to
         )
 
-        df = read_range_df(
+        key = self._make_key(cfg)
+        now = time.time()
+
+        if cfg.use_cache and key in self._cache_results:
+            ts, cached = self._cache_results[key]
+            if now - ts <= max(0, int(cfg.cache_ttl_s)):
+                logger.info("Bridge cache HIT: %s", key)
+                df = cached.copy()
+            else:
+                self._cache_results.pop(key, None)
+                df = None
+        else:
+            df = None
+
+        if df is None or df.empty:
+            df = read_range_df(
             lake_root=cfg.lake_root,
             market="crypto",
             tf=cfg.tf,
@@ -74,7 +109,13 @@ class DatalakeFeed:
             date_from=cfg.date_from,
             date_to=cfg.date_to,
             source=cfg.source,
-        )
+            )
+            if cfg.use_cache and df is not None:
+                # Guardar en LRU
+                self._cache_results[key] = (now, df.copy())
+                # mover al final (más reciente)
+                self._cache_results.move_to_end(key, last=True)
+                self._prune_lru(self._cache_results, self._cache_max_entries)
         if df is None or df.empty:
             logger.warning("Bridge: DataFrame vacío para rango solicitado.")
             return pd.DataFrame()
