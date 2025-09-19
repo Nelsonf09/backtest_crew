@@ -204,6 +204,12 @@ Se recomiendan dos opciones para manejar dependencias: `venv` (incluido en Pytho
       --mode bulk --rename-ts-to timestamp
     ```
 
+    - Validación rápida Fase 0 (recomendado):
+
+      1) Revisa el esquema mínimo: `docs/datalake_schema_binance.md`.
+      2) Asegura `pyarrow` instalado (lo trae `requirements.txt`).
+      3) Ejecuta el CLI anterior y confirma que imprime ~1440 filas para un día M1 y genera `.tmp/bridge_sample.csv`.
+
   - Comandos de lint/format:
 
     ```bash
