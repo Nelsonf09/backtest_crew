@@ -210,6 +210,18 @@ Se recomiendan dos opciones para manejar dependencias: `venv` (incluido en Pytho
       2) Asegura `pyarrow` instalado (lo trae `requirements.txt`).
       3) Ejecuta el CLI anterior y confirma que imprime ~1440 filas para un día M1 y genera `.tmp/bridge_sample.csv`.
 
+    - Usar el fixture de prueba (opcional):
+
+      Si quieres usar un fixture pequeño versionado en el repo:
+
+      ```bash
+      export LAKE_ROOT=/workspaces/backtest_crew/tests/fixtures/datalake_sample
+      PYTHONPATH=/workspaces/backtest_crew:/workspaces/backtest_crew-datalake/src \
+      python -m backtest_crew.bridge.cli \
+        --lake-root $LAKE_ROOT --source binance --symbol BTC-USD \
+        --tf M1 --date-from 2025-08-01 --date-to 2025-08-02 --mode bulk
+      ```
+
   - Comandos de lint/format:
 
     ```bash
