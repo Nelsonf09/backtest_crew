@@ -1,0 +1,121 @@
+Roadmap: Integración Datalake (Binance) -> Motor rápido + Streamlit
+
+Este documento reproduce el roadmap detallado para integrar el Datalake (datos de Binance) con el motor rápido de la app Streamlit, manteniendo intactos el core del motor, la lógica de la estrategia B&R y los elementos de UI iniciales.
+
+Resumen del contexto
+- Repos: `backtest_crew` (motor + UI) y `backtest_crew-datalake` (datalake reader/ingest).
+- La UI Streamlit actual usa un `DataManager` y ejecuta el motor rápido `run_fast_backtest_exact`.
+- `tools/run_backtest.py` ya tiene soporte básico para `--use-datalake` y existe `backtest_crew.bridge.DatalakeFeed`.
+- La estrategia B&R (`OpeningBreakRetestStrategy`) espera DataFrames con las columnas estándar (`open, high, low, close, volume, EMA_*`) y un índice datetime tz-aware en UTC.
+
+Fase 0 — Preparación y validación inicial (1-2 días)
+- Objetivo: confirmar datos y entorno mínimo para pruebas.
+- Actividades:
+  - Verificar/especificar esquema mínimo de parquet Binance (columnas y tipos). Entregable: `docs/datalake_schema_binance.md` con las columnas mínimas y ejemplo.
+  - Confirmar que `pyarrow` está instalado en el entorno de `backtest_crew`.
+  - Validar que `backtest_crew.bridge.DatalakeFeed` carga un DataFrame con columna `ts` o index datetime tz-aware.
+- Criterio de aceptación: `python -m backtest_crew.bridge.cli --mode bulk` produce una muestra `.tmp/bridge_sample.csv` con columnas esperadas.
+
+Fase 1 — Requisitos de datos y sample (2-4 días)
+- Objetivo: disponer de una muestra de Datalake de Binance (M1, M5) para tests locales y CI.
+- Actividades:
+  - Definir esquema mínimo: `ts` (ISO UTC / datetime), `open`, `high`, `low`, `close`, `volume`, `source`, `symbol` (si aplicable), `market`, `timeframe`.
+  - Crear script `tools/generate_sample_datalake.py` que convierte CSV sintético a particiones parquet con estructura `source=binance/market=crypto/timeframe=M1/symbol=BTC-USD/year=YYYY/month=MM/part-*.parquet`.
+  - Colocar muestra en `vendor/datalake/data` o en `tests/fixtures/datalake_sample`.
+- Entregable: carpeta con parquets de ejemplo y script de generación; `docs/WORKSPACE_SETUP.md` actualizado con ejemplo LAKE_ROOT local.
+- Criterio: `bridge.cli --mode bulk` carga muestra correctamente.
+
+Fase 2 — Lector eficiente y contrato (3-6 días)
+- Objetivo: garantizar un reader robusto, eficiente y compatible con la estrategia.
+- Actividades:
+  - Revisar/implementar `backtest_crew/bridge/datalake_feed.py` con `pyarrow.dataset` o `polars`:
+    - Lectura por partición (filtrado por `source`, `symbol`, `tf`, `year`, `month`).
+    - Soporte para `date_from`/`date_to` y clipping temporal (half-open `[from, to)`).
+    - Opción `rename_ts_to` para renombrar `ts` al nombre que espera el pipeline.
+    - Normalizar índice a `DatetimeIndex` tz-aware UTC o mantener columna `ts` consistente.
+  - Añadir pruebas unitarias para:
+    - Carga por rango diario completo.
+    - Clipping por hora.
+    - Manejo de particiones faltantes.
+- Entregable: `datalake_feed.py` robusto + tests ampliados.
+- Criterio: tests de lectura pasan y tiempos de carga razonables en la muestra.
+
+Fase 3 — Integración no intrusiva al motor y DataManager (2-4 días)
+- Objetivo: permitir que la UI y `tools/run_backtest.py` cambien la fuente sin tocar core ni la estrategia.
+- Actividades:
+  - Confirmar contrato entre `DatalakeFeed.load_df()` y `DataManager.get_main_data()`/`run_backtest`.
+  - Implementar alternativa no intrusiva:
+    - Preferible: inyección desde UI (`ui/app.py`) — cuando `ui_use_datalake` esté on, la UI llamará a `DatalakeFeed.load_df()` y pasará el DataFrame directamente a `add_technical_indicators` y al motor, evitando cambiar `DataManager`.
+    - Alternativa: añadir método liviano en `DataManager` para setear `forced_main_data` (si inyección desde UI no es viable).
+  - Asegurar que `tools/run_backtest.py` y la UI usan la misma conversión de TF (IB -> M1/M5).
+- Entregable: extensión ligera en `DataManager` o inyección desde UI (documentado).
+- Criterio: en la UI, seleccionar "usar datalake" hace que el proceso consuma el DataFrame cargado por `DatalakeFeed` y los renderers/métricas funcionen sin cambios.
+
+Fase 4 — UI: controles y flujo (no modificar inputs existentes) (2-3 días)
+- Objetivo: permitir al usuario activar `use_datalake` y configurar `lake_root`, `dl-source`, `dl-symbol`, `dl-date(s)` desde la UI, sin alterar las listas desplegables y demás elementos existentes.
+- Actividades:
+  - Añadir en la barra lateral (bloque colapsable "Datalake (Opcional)") controles:
+    - Checkbox `Usar Datalake`.
+    - Input `lake_root` (valor por defecto de env/config si existe).
+    - Select `dl-source`.
+    - Text `dl-symbol`.
+    - Date input `dl-date` o rango.
+    - Select `dl-tf`.
+  - Implementar en `ui/app.py` la ruta de ejecución que, cuando `ui_use_datalake` esté activado, carga el DataFrame con `DatalakeFeed` y reemplaza localmente la llamada a `dm.get_main_data()` por ese DataFrame (sin modificar los inputs existentes).
+- Entregable: UI con bloque Datalake y comportamiento de ejecución que alimenta el motor con datos del Datalake.
+- Criterio: flujo UI sin pérdida de elementos iniciales, y backtest produce las mismas vistas/estadísticas/plots.
+
+Fase 5 — Validación de resultados y tests comparativos (3-5 días)
+- Objetivo: garantizar consistencia de resultados entre IB y Datalake y que la UI renderice igual.
+- Actividades:
+  - Tests de integración que comparen:
+    - motor con IB (mocked) vs motor con datalake sobre el mismo periodo y comparar métricas globales dentro de tolerancias.
+  - Añadir contract tests para la estrategia (EMAs, niveles, etc.).
+  - Test end-to-end en Streamlit (manual/automatizable).
+- Entregable: suite de tests y `docs/VALIDATION.md`.
+- Criterio: pruebas pasan localmente y diferencias IB vs Datalake documentadas.
+
+Fase 6 — Rendimiento y caching (3-6 días)
+- Objetivo: reducir latencia y evitar relecturas innecesarias en Streamlit.
+- Actividades:
+  - Implementar cache por consulta (LRU) en `DatalakeFeed`.
+  - Usar `pyarrow.dataset` con pushdown filters o `polars` para escaneo eficiente.
+  - Cargar por día/mes y evaluar chunking.
+  - Exponer opción en UI `Usar cache` (ya existe `ui_use_cache`) y documentar interacción.
+- Entregable: caching y mediciones en `docs/PERF.md`.
+- Criterio: tiempos de carga aceptables para muestras.
+
+Fase 7 — CI/CD, documentación final y despliegue (2-4 días)
+- Objetivo: integración reproducible y documentada.
+- Actividades:
+  - Añadir jobs en CI (GitHub Actions) para tests del bridge y lint/format.
+  - Actualizar `docs/WORKSPACE_SETUP.md` con pasos para Streamlit (activar `Usar Datalake`, preparar `LAKE_ROOT`).
+  - Crear guía de despliegue para Streamlit.
+- Entregable: CI config + docs actualizados.
+- Criterio: jobs de CI pasan para tests que no requieren datos reales.
+
+Estimaciones y prioridades
+- Sprint 1 (2 semanas): Fase 0 + Fase 1 + lector básico (Fase 2 inicial).
+- Sprint 2 (2 semanas): Fase 3 + Fase 4 + tests comparativos iniciales.
+- Sprint 3 (2 semanas): Fase 6 + Fase 7.
+
+Riesgos y mitigaciones
+- Esquema distinto: crear script de muestreo y validación (Fase 0).
+- Timezone: normalizar a UTC en `DatalakeFeed`.
+- Latencia: particionado por year/month + caching.
+- Cambios en UI: agregar bloque colapsable y pruebas manuales.
+
+Checklist mínima para comenzar
+- [x] Confirmar que `DatalakeFeed` y CLI existen.
+- [ ] Crear muestra de parquets (M1/M5).
+- [ ] Ajustar `DatalakeFeed.load_df` para clipping y normalización UTC.
+- [ ] Añadir bandera en UI y flujo de inyección desde UI/app.py.
+- [ ] Tests end-to-end con muestra.
+- [ ] Caching y documentación.
+
+Siguiente paso propuesto
+- Generar la especificación de esquema y un script para crear una muestra de parquets (M1/M5) y colocarlos en `tests/fixtures/datalake_sample`. Ejecutar `backtest_crew.bridge.cli --mode bulk` contra la muestra para validar la carga.
+
+---
+
+Documento creado para referencia y sincronización entre repositorios. Mantener en la rama `feat/bridge-datalake` del repo `backtest_crew-datalake`.
