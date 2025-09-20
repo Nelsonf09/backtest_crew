@@ -430,31 +430,44 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
                     date_to=date_to_check,
                     source=dl_source,
                 )
-        missing_tfs = set()
-        if df_exec_check is None or df_exec_check.empty:
-            missing_tfs.add(dl_exec_tf)
-        if df_filter_check is None or df_filter_check.empty:
-            missing_tfs.add(dl_filter_tf)
-        if missing_tfs:
-            faltantes = ", ".join(sorted(missing_tfs))
-            st.warning(f"No se encontraron datos en el rango solicitado para: {faltantes}. Intentando ingestar desde Binance...")
+        # Detección fina: días faltantes por TF entre [ui_download_start, ui_download_end]
+        d0 = st.session_state.ui_download_start
+        d1 = st.session_state.ui_download_end
+        tfs_to_check = {dl_exec_tf, dl_filter_tf}
+        missing_days_by_tf: dict[str, list[str]] = {tf: [] for tf in tfs_to_check}
+        with st.spinner("Comprobando cobertura diaria en Datalake..."):
+            cur_day = d0
+            while cur_day <= d1:
+                day_from = f"{cur_day.isoformat()}T00:00:00Z"
+                day_to = f"{(cur_day + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
+                for tf_dl in tfs_to_check:
+                    df_day = read_range_df(
+                        lake_root=lake_root,
+                        market="crypto",
+                        tf=tf_dl,
+                        symbol=dl_symbol,
+                        date_from=day_from,
+                        date_to=day_to,
+                        source=dl_source,
+                    )
+                    if df_day is None or df_day.empty:
+                        missing_days_by_tf[tf_dl].append(cur_day.isoformat())
+                cur_day = cur_day + datetime.timedelta(days=1)
+        # Preparar ingesta sólo para los días faltantes
+        missing_summary = {tf: days for tf, days in missing_days_by_tf.items() if days}
+        if missing_summary:
+            faltantes_txt = ", ".join([f"{tf}({len(days)} día(s))" for tf, days in missing_summary.items()])
+            st.warning(f"Faltan datos por día para: {faltantes_txt}. Ingestando desde Binance...")
             ingest = _import_binance_ingest()
             if ingest is None:
                 st.error("No se pudo importar el ingestor de Binance. Revisa PYTHONPATH del datalake.")
                 st.stop()
-            # Iterar días de la ventana real de backtest (sin warmup para no exceder)
-            d0 = st.session_state.ui_download_start
-            d1 = st.session_state.ui_download_end
-            cur = d0
             with st.spinner("Ingestando datos faltantes (puede tardar)..."):
-                # Asegurar que la ingesta escriba en el lake seleccionado
                 os.environ["LAKE_ROOT"] = lake_root
-                # Pasar región Binance (global/us) al ingestor
                 dl_region = st.session_state.get("ui_dl_region", os.getenv("BINANCE_REGION", "global"))
                 os.environ["BINANCE_REGION"] = dl_region
-                while cur <= d1:
-                    day = cur.isoformat()
-                    for tf_dl in sorted(missing_tfs):
+                for tf_dl, days in missing_summary.items():
+                    for day in days:
                         ns = type("Args", (), {
                             "symbols": dl_symbol,
                             "date_from": day,
@@ -463,12 +476,11 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
                             "binance_region": dl_region,
                         })()
                         try:
-                            ingest(ns)  # escribe al lake
+                            ingest(ns)
                         except SystemExit:
                             pass
                         except Exception as e:
                             st.warning(f"Fallo ingesta {dl_symbol} {tf_dl} {day}: {e}")
-                    cur = cur + datetime.timedelta(days=1)
 
     with st.spinner(label):
         if use_dl:
