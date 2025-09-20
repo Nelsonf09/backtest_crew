@@ -11,8 +11,25 @@ def drawdown_stats(equity: pd.Series) -> dict:
     y los índices de inicio/fin del tramo MDD pico->valle."""
     if not isinstance(equity, pd.Series):
         equity = pd.Series(equity, dtype='float64')
+    # Normalizar: descartar NaN y asegurar float64
+    equity = equity.astype('float64').dropna()
+    if equity.empty:
+        return {
+            'dd_series_pct': pd.Series(dtype='float64'),
+            'max_drawdown_pct': 0.0,
+            'mdd_start_idx': None,
+            'mdd_end_idx': None,
+        }
     peak = equity.cummax()
     dd = (equity/peak) - 1.0
+    # En teoría dd no debería estar vacío aquí, pero agregamos defensa
+    if dd.empty:
+        return {
+            'dd_series_pct': pd.Series(dtype='float64'),
+            'max_drawdown_pct': 0.0,
+            'mdd_start_idx': None,
+            'mdd_end_idx': None,
+        }
     mdd_end = dd.idxmin()
     start_slice = equity.loc[:mdd_end]
     start_peak = start_slice.cummax()
