@@ -386,6 +386,11 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
 
     # Si Datalake está activo, validar disponibilidad y opcionalmente ingestar
     if use_dl:
+        # Validar lake_root antes de cualquier operación con el Datalake
+        lake_root = st.session_state.get("ui_lake_root") or os.getenv("LAKE_ROOT", "")
+        if not lake_root:
+            st.error("Falta la ruta del Datalake: completa 'lake_root' en el panel o define LAKE_ROOT en el entorno.")
+            st.stop()
         read_range_df = _import_datalake_reader()
         if read_range_df is None:
             st.error("No se pudo importar datalake.read.api.read_range_df. Revisa PYTHONPATH.")
@@ -398,7 +403,7 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
         date_to_check = f"{(end_dt + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
         dl_symbol = (st.session_state.get("ui_dl_symbol") or st.session_state.ui_symbol)
         dl_source = st.session_state.get("ui_dl_source", "binance")
-        lake_root = st.session_state.get("ui_lake_root") or os.getenv("LAKE_ROOT", "")
+        # lake_root ya validado arriba
 
         with st.spinner("Verificando disponibilidad en Datalake..."):
             df_check = read_range_df(
@@ -428,8 +433,8 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
             cur = d0
             with st.spinner("Ingestando datos faltantes (puede tardar)..."):
                 # Asegurar que la ingesta escriba en el lake seleccionado
-                if lake_root:
-                    os.environ["LAKE_ROOT"] = lake_root
+                # Garantizar LAKE_ROOT para el ingestor
+                os.environ["LAKE_ROOT"] = lake_root
                 # Pasar región Binance (global/us) al ingestor
                 dl_region = st.session_state.get("ui_dl_region", os.getenv("BINANCE_REGION", "global"))
                 os.environ["BINANCE_REGION"] = dl_region
