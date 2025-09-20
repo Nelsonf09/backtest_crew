@@ -48,6 +48,18 @@ O alternativamente `--date-from` y `--date-to`.
 
 Si `--use-datalake` es falso/ausente, no se modifica nada del pipeline actual.
 
+## Uso desde la UI (Streamlit)
+
+- En la barra lateral, abre el bloque "Datalake (Opcional)".
+- Activa "Usar Datalake (Crypto)".
+- Completa `lake_root` (o exporta `LAKE_ROOT`), `dl-source` (ej. `binance`) y opcionalmente `dl-symbol`.
+- Selecciona Mercado = "Cryptomonedas" y define el rango en "Inicio/Fin Descarga"; la UI construye `[from,to)` UTC automáticamente.
+- El sistema cargará las velas de ejecución y filtro directamente del Datalake y continuará el pipeline sin cambios.
+
+Notas importantes:
+- Actualmente el Datalake está integrado para Crypto (Binance). Para otros mercados se usa IB.
+- Los niveles (PDH/PDL/PMH/PML) continúan obteniéndose vía IB; se requiere conexión válida para calcularlos.
+
 ## Conteos esperados por timeframe (1 día completo UTC)
 - M1: 1440
 - M5: 288

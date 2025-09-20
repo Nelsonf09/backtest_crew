@@ -75,6 +75,44 @@ Rama de trabajo: `feat/bridge-datalake`.
 
 ---
 
+## Fase 3 — Integración no intrusiva al motor y DataManager
+
+- Objetivo: permitir que la UI y `tools/run_backtest.py` cambien la fuente sin tocar el core ni la estrategia.
+- Entregables cumplidos:
+  - Inyección desde UI: cuando el bloque "Datalake (Opcional)" está activo, `ui/app.py` usa `DatalakeFeed.load_df()` para cargar datos de ejecución y filtro directamente, y alimenta `add_technical_indicators` y el motor sin modificar la estrategia.
+  - Controles UI: en la barra lateral, expander "Datalake (Opcional)" con `Usar Datalake (Crypto)`, `lake_root`, `dl-source` y `dl-symbol` (override opcional).
+  - Niveles adaptativos:
+    - Si `Usar Datalake` está ON (Crypto): la UI deriva `PDH/PDL` del día previo y `PMH/PML` de la preapertura del propio día usando el DataFrame del Datalake. `ORH/ORL` se calculan desde la ventana OR.
+    - Si `Usar Datalake` está OFF: se mantiene `DataManager.get_levels_data()` (IB) para niveles.
+  - CLI `tools/run_backtest.py`: al pasar `--use-datalake`, lee el DataFrame del Datalake y deriva niveles del propio DataFrame (no requiere `ib_insync`). Si no, mantiene la ruta IB.
+  - Mapeo de TF unificado (IB→Datalake): `1 min→M1`, `5 mins→M5`, `15 mins→M15`, `30 mins→M30`.
+- Cómo verificar:
+  1) Streamlit con fixture (sin IB):
+     ```bash
+     # 1) Preparar entorno
+     cd /workspaces/backtest_crew
+     python -m venv .venv && source .venv/bin/activate
+     pip install -r requirements.txt
+     # El reader del datalake va por PYTHONPATH (desarrollo local con monorepo)
+     export PYTHONPATH=/workspaces/backtest_crew:/workspaces/backtest_crew-datalake/src
+     export LAKE_ROOT=/workspaces/backtest_crew/tests/fixtures/datalake_sample
+
+     # 2) Ejecutar la app
+     streamlit run ui/app.py
+     ```
+     - En la UI: Mercado="Cryptomonedas", abrir "Datalake (Opcional)", activar "Usar Datalake (Crypto)", verificar `lake_root`, ejecutar backtest rápido. Debería renderizar sin conexión a IB.
+
+  2) CLI rápido sin IB (con fixture):
+     ```bash
+     export PYTHONPATH=/workspaces/backtest_crew:/workspaces/backtest_crew-datalake/src
+     python tools/run_backtest.py --engine fast --market crypto --symbol BTC-USD \
+       --timeframe "1 min" --limit 1 --out backtest.json \
+       --use-datalake --lake-root $LAKE_ROOT --dl-source binance --dl-date 2025-08-01
+     ```
+     - Esperado: genera `backtest.json` con métricas sin depender de `ib_insync`.
+
+---
+
 ## Observaciones y alcances
 
 - No se modificaron el core del motor, la lógica de la estrategia B&R ni los inputs existentes de la UI.
@@ -85,9 +123,9 @@ Rama de trabajo: `feat/bridge-datalake`.
 
 ## Próximo foco (para siguientes fases)
 
-- Fase 3/4: inyección no intrusiva desde `ui/app.py` (bloque "Datalake") y ruta que entregue el DataFrame al motor.
+- Fase 4: completar controles de UI (selector de TF Datalake, rango por día/rango, toggles de caché y diagnóstico), sin romper inputs existentes.
 - Fase 5: comparativas IB vs Datalake y documentación en `docs/VALIDATION.md`.
-- Fase 6: mediciones ampliadas y switches de rendimiento en UI.
+- Fase 6: mediciones ampliadas y switches de rendimiento en UI, cacheo configurable.
 
 ---
 

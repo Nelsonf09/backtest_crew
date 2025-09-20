@@ -15,7 +15,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
-from agent_core.data_manager import DataManager
 from agent_core.technical_analyzer import add_technical_indicators
 from shared.timezone_handler import TimezoneHandler
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
@@ -29,9 +28,25 @@ except Exception:  # pragma: no cover
     DatalakeFeed = None  # type: ignore
 
 
+def _calc_pdh_pdl(df_previous_day: pd.DataFrame) -> dict:
+    if df_previous_day is None or df_previous_day.empty:
+        return {"PDH": None, "PDL": None}
+    pdh = pd.to_numeric(df_previous_day["high"], errors="coerce").max()
+    pdl = pd.to_numeric(df_previous_day["low"], errors="coerce").min()
+    return {"PDH": pdh if pd.notna(pdh) else None, "PDL": pdl if pd.notna(pdl) else None}
+
+
+def _calc_pmh_pml(df_premarket: pd.DataFrame) -> dict:
+    if df_premarket is None or df_premarket.empty:
+        return {"PMH": None, "PML": None}
+    pmh = pd.to_numeric(df_premarket["high"], errors="coerce").max()
+    pml = pd.to_numeric(df_premarket["low"], errors="coerce").min()
+    return {"PMH": pmh if pd.notna(pmh) else None, "PML": pml if pd.notna(pml) else None}
+
+
 def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_path: Path,
                  use_datalake: bool = False, lake_kwargs: dict | None = None) -> None:
-    dm = DataManager()
+    dm = None
     tz_handler = TimezoneHandler()
 
     today = dt.date.today()
@@ -54,7 +69,7 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
     if use_datalake and DatalakeFeed and BridgeConfig and lake_kwargs:
         # Interpretamos timeframe IB -> tf datalake si es posible (simple mapping de minutos).
         tf_map = {"1 min": "M1", "5 mins": "M5", "15 mins": "M15", "30 mins": "M30"}
-        dl_tf = tf_map.get(timeframe.lower(), "M1")
+        dl_tf = tf_map.get((timeframe or "").strip().lower(), "M1")
         # Determinamos rango: si se pasa 'date' en lake_kwargs se convierte en from/to.
         if 'date' in lake_kwargs and lake_kwargs['date']:
             date_str = lake_kwargs.pop('date')
@@ -67,13 +82,14 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
             lake_root=lake_kwargs.get('lake_root') or os.getenv('LAKE_ROOT', ''),
             source=lake_kwargs.get('source', 'binance'),
             symbol=lake_kwargs.get('symbol', symbol),
-            tf=lake_kwargs.get('tf', dl_tf),
+            tf=(lake_kwargs.get('tf') or dl_tf),
             date_from=lake_kwargs.get('date_from'),
             date_to=lake_kwargs.get('date_to'),
             mode=lake_kwargs.get('mode', 'bulk'),
             speed_bps=float(lake_kwargs.get('speed_bps', 0.0)),
             rename_ts_to=lake_kwargs.get('rename_ts_to'),
         )
+        print(f"[dbg] Datalake cfg: root={cfg.lake_root} source={cfg.source} symbol={cfg.symbol} tf={cfg.tf} from={cfg.date_from} to={cfg.date_to}")
         feed = DatalakeFeed()
         df_exec = feed.load_df(cfg)
         if df_exec is not None and not df_exec.empty:
@@ -86,6 +102,9 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
         else:
             df_exec = None
     else:
+        # Importar DataManager solo si se usa IB
+        from agent_core.data_manager import DataManager  # type: ignore
+        dm = DataManager()
         df_exec = dm.get_main_data(
             symbol=symbol,
             timeframe=timeframe,
@@ -115,29 +134,51 @@ def run_backtest(symbol: str, timeframe: str, market: str, limit_days: int, out_
 
     for date in unique_dates:
         date_obj = date.date()
-        df_prev, df_pm = dm.get_levels_data(
-            target_date=date_obj,
-            symbol=symbol,
-            sec_type=sec_type,
-            exchange=exchange,
-            currency=currency,
-            use_cache=True,
-            market=market,
-        )
-        levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
         df_day = df_enriched[df_enriched.index.date == date_obj]
         if df_day.empty:
             continue
 
-        try:
-            or_start_time = tz_handler.market_open_time
-            or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
-            or_end_dt = or_start_dt + dt.timedelta(minutes=5)
-            or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
+        # Derivar niveles según fuente
+        if use_datalake:
+            prev_day = date_obj - dt.timedelta(days=1)
+            df_prev = df_enriched[df_enriched.index.date == prev_day]
+            # Ventana OR por defecto: usar 5 minutos desde inicio del día en zona de mercado (aprox)
+            try:
+                or_start_time = tz_handler.market_open_time
+                or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
+                or_end_dt = or_start_dt + dt.timedelta(minutes=5)
+                df_pm = df_day[df_day.index < or_start_dt]
+                or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
+            except Exception:
+                df_pm = df_day.iloc[0:0]
+                or_candles = df_day.iloc[0:0]
+            levels = {**_calc_pdh_pdl(df_prev), **_calc_pmh_pml(df_pm)}
             if not or_candles.empty:
                 levels["ORH"], levels["ORL"] = or_candles["high"].max(), or_candles["low"].min()
-        except Exception:
-            pass
+        else:
+            # Importar DataManager para niveles IB si no fue importado antes
+            if dm is None:
+                from agent_core.data_manager import DataManager  # type: ignore
+                dm = DataManager()
+            df_prev, df_pm = dm.get_levels_data(
+                target_date=date_obj,
+                symbol=symbol,
+                sec_type=sec_type,
+                exchange=exchange,
+                currency=currency,
+                use_cache=True,
+                market=market,
+            )
+            levels = {**_calc_pdh_pdl(df_prev), **_calc_pmh_pml(df_pm)}
+            try:
+                or_start_time = tz_handler.market_open_time
+                or_start_dt = df_day.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
+                or_end_dt = or_start_dt + dt.timedelta(minutes=5)
+                or_candles = df_day[(df_day.index >= or_start_dt) & (df_day.index < or_end_dt)]
+                if not or_candles.empty:
+                    levels["ORH"], levels["ORL"] = or_candles["high"].max(), or_candles["low"].min()
+            except Exception:
+                pass
 
         previous_day_data = df_enriched[df_enriched.index.date < date_obj]
         df_lookback = previous_day_data.tail(60)

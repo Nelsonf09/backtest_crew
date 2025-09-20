@@ -288,6 +288,33 @@ Se recomiendan dos opciones para manejar dependencias: `venv` (incluido en Pytho
     flake8
     ```
 
+8) Guía rápida: ejecutar Streamlit local con Datalake (sin IB)
+
+```bash
+# 1) Activar entorno y dependencias (en backtest_crew)
+cd /path/to/backtest_crew
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+
+# 2) Exponer el reader del datalake en PYTHONPATH y definir LAKE_ROOT
+export PYTHONPATH=/path/to/backtest_crew:/path/to/backtest_crew-datalake/src
+export LAKE_ROOT=/path/to/backtest_crew/tests/fixtures/datalake_sample
+
+# 3) Ejecutar la app de Streamlit
+streamlit run ui/app.py
+```
+
+En la app:
+- Selecciona Mercado = "Cryptomonedas".
+- Abre el expander "Datalake (Opcional)", activa "Usar Datalake (Crypto)", revisa `lake_root` y `dl-source`.
+- Define Inicio/Fin de descarga y ejecuta el backtest.
+
+Notas:
+- Con "Usar Datalake" activo, los niveles (PDH/PDL/PMH/PML) se derivan del propio DataFrame del Datalake (no requiere IB).
+- Para otros mercados o si desactivas Datalake, se usará IB y es necesario tener conectado TWS/Gateway y `ib_insync` instalado.
+
 7) Solución de problemas
 
 - Si VS Code no detecta el intérprete: asegúrate de que la carpeta del proyecto esté abierta en el workspace y recarga la ventana (`Developer: Reload Window`).

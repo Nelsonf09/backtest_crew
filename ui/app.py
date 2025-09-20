@@ -27,6 +27,7 @@ from decimal import Decimal
 import sys
 import pytz
 import re
+import os
 
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
@@ -50,6 +51,13 @@ from shared.fsm import FSM, AppState
 from strategies.vectorized_obr_exact import run_fast_backtest_exact
 
 st.set_page_config(layout="wide", page_title="Backtester Híbrido (IA)", initial_sidebar_state="expanded")
+
+# Integración opcional con Datalake (Bridge)
+try:
+    from backtest_crew.bridge import BridgeConfig, DatalakeFeed  # type: ignore
+except Exception:
+    BridgeConfig = None  # type: ignore
+    DatalakeFeed = None  # type: ignore
 
 
 def ema_tf_value_to_label(value: str) -> str:
@@ -123,6 +131,12 @@ def initialize_session_state():
     st.session_state.ui_what_to_show = config.WHAT_TO_SHOW
     st.session_state.ui_use_cache = config.ENABLE_CACHING
 
+    # Estado Datalake (opcional)
+    st.session_state.ui_use_datalake = False
+    st.session_state.ui_lake_root = os.getenv("LAKE_ROOT", "") if os.getenv("LAKE_ROOT") else ""
+    st.session_state.ui_dl_source = "binance"
+    st.session_state.ui_dl_symbol = None
+
     st.session_state.ui_first_trade_loss_stop_pct = 6.0
 
     st.session_state.data_manager = get_dm()
@@ -180,17 +194,39 @@ def run_single_backtest_iteration(df_enriched, tz_handler, ema_filter_mode):
     )
     for date in unique_dates:
         date_obj = date.date()
-        df_prev, df_pm = dm.get_levels_data(
-            target_date=date_obj, symbol=st.session_state.ui_symbol,
-            sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
-            currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
-            primary_exchange=st.session_state.ui_primary_exchange,
-            market=market_type,
-        )
-        levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+        # Subconjunto del día
         df_day = df_enriched[df_enriched.index.date == date_obj]
         if df_day.empty:
             continue
+
+        # Origen de niveles: Datalake vs IB
+        if bool(st.session_state.get("ui_use_datalake")) and market_type == "crypto":
+            prev_day = date_obj - datetime.timedelta(days=1)
+            df_prev = df_enriched[df_enriched.index.date == prev_day]
+            # Determinar ventana previa a la apertura (usando perfil OR si disponible)
+            try:
+                df_day_marked = stamp_liquidity_window(
+                    df_day.copy(),
+                    market_type,
+                    st.session_state.get('or_window'),
+                )
+                if 'in_opening_window' in df_day_marked.columns and df_day_marked['in_opening_window'].any():
+                    first_or_idx = df_day_marked.index[df_day_marked['in_opening_window']].min()
+                    df_pm = df_day_marked[df_day_marked.index < first_or_idx]
+                else:
+                    df_pm = df_day_marked.iloc[0:0]
+            except Exception:
+                df_pm = df_day.iloc[0:0]
+            levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+        else:
+            df_prev, df_pm = dm.get_levels_data(
+                target_date=date_obj, symbol=st.session_state.ui_symbol,
+                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+                primary_exchange=st.session_state.ui_primary_exchange,
+                market=market_type,
+            )
+            levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
 
         try:
             df_day = stamp_liquidity_window(
@@ -254,6 +290,9 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
     adjusted_download_start = st.session_state.ui_download_start - warmup_period
 
     market = st.session_state.ui_market
+    market_key = market.lower()
+    if market_key == "cryptomonedas":
+        market_key = "crypto"
     if market == "forex":
         if st.session_state.ui_primary_exchange:
             st.info("Primary Exchange no aplica en Forex y será ignorado.")
@@ -317,15 +356,79 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
             "market": "stocks",
         }
 
-    with st.spinner(f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."):
-        df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
+    use_dl = bool(st.session_state.get("ui_use_datalake")) and DatalakeFeed and BridgeConfig and (market_key == "crypto")
+    label = f"Cargando datos (Ejecución: {exec_tf}, Filtro: {filter_tf})..."
+    if st.session_state.get("ui_use_datalake") and market_key != "crypto":
+        st.info("Datalake actual soporta solo Crypto (Binance). Se usará IB para otros mercados.")
 
-        # Evitamos duplicar descargas cuando ambos timeframes coinciden
-        df_filter_raw = (
-            dm.get_main_data(timeframe=filter_tf, **common_params)
-            if filter_tf != exec_tf
-            else df_exec_raw.copy()
-        )
+    with st.spinner(label):
+        if use_dl:
+            def _map_tf_to_dl(tf_label: str) -> str:
+                s = (tf_label or "").strip().lower().replace("mins", "min").replace(" ", "")
+                if s in ("1min", "1m"): return "M1"
+                if s in ("5min", "5m"): return "M5"
+                if s in ("15min", "15m"): return "M15"
+                if s in ("30min", "30m"): return "M30"
+                return "M1"
+
+            dl_exec_tf = _map_tf_to_dl(exec_tf)
+            dl_filter_tf = _map_tf_to_dl(filter_tf)
+
+            start_dt = adjusted_download_start
+            end_dt = st.session_state.ui_download_end
+            date_from = f"{start_dt.isoformat()}T00:00:00Z"
+            date_to = f"{(end_dt + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
+
+            lake_root = st.session_state.get("ui_lake_root") or os.getenv("LAKE_ROOT", "")
+            dl_source = st.session_state.get("ui_dl_source", "binance")
+            dl_symbol = (st.session_state.get("ui_dl_symbol") or st.session_state.ui_symbol)
+
+            feed = DatalakeFeed()
+            cfg_exec = BridgeConfig(
+                lake_root=lake_root,
+                source=dl_source,
+                symbol=dl_symbol,
+                tf=dl_exec_tf,
+                date_from=date_from,
+                date_to=date_to,
+                mode="bulk",
+                speed_bps=0.0,
+                rename_ts_to=None,
+                use_cache=bool(st.session_state.ui_use_cache),
+            )
+            df_exec_raw = feed.load_df(cfg_exec)
+            if not df_exec_raw.empty and "ts" in df_exec_raw.columns:
+                df_exec_raw = df_exec_raw.set_index("ts")
+                if df_exec_raw.index.tz is None:
+                    df_exec_raw.index = df_exec_raw.index.tz_localize("UTC")
+
+            if dl_filter_tf == dl_exec_tf:
+                df_filter_raw = df_exec_raw.copy() if df_exec_raw is not None else pd.DataFrame()
+            else:
+                cfg_filter = BridgeConfig(
+                    lake_root=lake_root,
+                    source=dl_source,
+                    symbol=dl_symbol,
+                    tf=dl_filter_tf,
+                    date_from=date_from,
+                    date_to=date_to,
+                    mode="bulk",
+                    speed_bps=0.0,
+                    rename_ts_to=None,
+                    use_cache=bool(st.session_state.ui_use_cache),
+                )
+                df_filter_raw = feed.load_df(cfg_filter)
+                if not df_filter_raw.empty and "ts" in df_filter_raw.columns:
+                    df_filter_raw = df_filter_raw.set_index("ts")
+                    if df_filter_raw.index.tz is None:
+                        df_filter_raw.index = df_filter_raw.index.tz_localize("UTC")
+        else:
+            df_exec_raw = dm.get_main_data(timeframe=exec_tf, **common_params)
+            df_filter_raw = (
+                dm.get_main_data(timeframe=filter_tf, **common_params)
+                if filter_tf != exec_tf
+                else df_exec_raw.copy()
+            )
 
     return df_exec_raw, df_filter_raw
 
@@ -739,6 +842,14 @@ with st.sidebar:
             help="En Forex se usará MIDPOINT internamente, aunque aquí veas TRADES.",
         )
         st.toggle("Usar Caché de Datos", key="ui_use_cache")
+
+    # --- Bloque Datalake (Opcional) ---
+    with st.expander("Datalake (Opcional)", expanded=False):
+        st.toggle("Usar Datalake (Crypto)", key="ui_use_datalake")
+        st.text_input("lake_root", key="ui_lake_root", placeholder="/ruta/al/lake_root", help="Si está vacío, se usa LAKE_ROOT del entorno")
+        st.text_input("dl-source", key="ui_dl_source", help="Fuente dentro del lake, p.ej. binance")
+        st.text_input("dl-symbol (override)", key="ui_dl_symbol", help="Dejar vacío para usar el símbolo de la UI")
+        st.caption("Nota: Datalake soportado en Crypto (Binance). El rango usa Inicio/Fin Descarga en UTC.")
 
     with st.expander("2. Estrategia y Ejecución", expanded=True):
         st.radio("Modo de Backtest", ["Visual (Paso a Paso)", "Rápido (Global)"], key="ui_backtest_mode")
