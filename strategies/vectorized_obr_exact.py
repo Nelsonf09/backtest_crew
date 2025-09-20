@@ -183,7 +183,10 @@ def run_fast_backtest_exact(
                     if not (np.isfinite(sl_price) and np.isfinite(tp_price) and entry_price > 0):
                         direction = 0
                     else:
-                        size = np.floor((equity * float(leverage)) / entry_price)
+                        if market.lower() == "crypto":
+                            size = (equity * float(leverage)) / entry_price
+                        else:
+                            size = np.floor((equity * float(leverage)) / entry_price)
                         if size <= 0:
                             direction = 0
                         else:

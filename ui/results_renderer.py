@@ -100,7 +100,14 @@ def render_global_results(filter_name: str = ""):
     
     trades_df_raw = st.session_state.session_trades
     equity_df = st.session_state.global_equity_history
-    
+
+    # Normaliza a DataFrame por si viene como lista de dicts/ndarray
+    if not isinstance(trades_df_raw, pd.DataFrame):
+        try:
+            trades_df_raw = pd.DataFrame(trades_df_raw)
+        except Exception:
+            trades_df_raw = pd.DataFrame()
+
     if trades_df_raw.empty:
         st.warning("La estrategia no generó ninguna operación en el período seleccionado.")
         return
