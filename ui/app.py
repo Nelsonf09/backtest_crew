@@ -397,7 +397,7 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
         date_from_check = f"{start_dt.isoformat()}T00:00:00Z"
         date_to_check = f"{(end_dt + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
         dl_symbol = (st.session_state.get("ui_dl_symbol") or st.session_state.ui_symbol)
-    dl_source = st.session_state.get("ui_dl_source", "binance")
+        dl_source = st.session_state.get("ui_dl_source", "binance")
         lake_root = st.session_state.get("ui_lake_root") or os.getenv("LAKE_ROOT", "")
 
         with st.spinner("Verificando disponibilidad en Datalake..."):
