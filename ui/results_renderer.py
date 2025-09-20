@@ -126,6 +126,15 @@ def render_global_results(filter_name: str = ""):
         trades_list,
         st.session_state.ui_initial_capital,
     )
+    # Alinear la métrica principal con el detalle: usar suma de PnL neto de trades
+    trades_net = float(trades_df['pnl_net'].sum())
+    metrics['Ganancia Neta Total ($)'] = trades_net
+    if st.session_state.ui_initial_capital > 0:
+        metrics['Ganancia Neta Total (%)'] = (trades_net / float(st.session_state.ui_initial_capital)) * 100.0
+    # (Opcional) Detectar discrepancia con equity por debugging silencioso
+    # equity_net = float(equity_series.iloc[-1] - st.session_state.ui_initial_capital) if len(equity_series) else 0.0
+    # if abs(equity_net - trades_net) > 0.01:
+    #     st.info(f"Nota: diferencia entre equity y suma de trades: {equity_net - trades_net:+.2f}")
     # Métricas adicionales para la UI
     pnl_series = trades_df['pnl_net']
     winning = pnl_series[pnl_series > 0]
