@@ -42,16 +42,27 @@ def render_comparison_dashboard():
     equity_dfs = {}
     # La clave del diccionario (ej. 'Fuerte' o '5 mins') se usa como nombre.
     for name, results in comparison_results.items():
-        equity_df = results['equity'].copy()
-        equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
-        equity_df = equity_df.set_index('time')
-        if equity_df.index.duplicated().any():
-            equity_df = equity_df[~equity_df.index.duplicated(keep='last')]
-        equity_df = equity_df.resample('D').last().ffill()
-        eq_series = equity_df['equity']
-        equity_dfs[name] = equity_df
+        equity_raw = results.get('equity')
+        if isinstance(equity_raw, pd.DataFrame) and not equity_raw.empty and 'time' in equity_raw.columns:
+            equity_df = equity_raw.copy()
+            equity_df['time'] = pd.to_datetime(equity_df['time'], unit='s', utc=True)
+            equity_df = equity_df.set_index('time')
+            if equity_df.index.duplicated().any():
+                equity_df = equity_df[~equity_df.index.duplicated(keep='last')]
+            equity_df = equity_df.resample('D').last().ffill()
+            eq_series = equity_df['equity']
+            equity_dfs[name] = equity_df
+        else:
+            # Equity ausente o sin columna 'time': usar serie vacía y no graficar
+            eq_series = pd.Series(dtype=float)
+            equity_dfs[name] = pd.DataFrame(columns=['equity'])
 
-        trades_df = results['trades']
+        trades_df = results.get('trades', pd.DataFrame())
+        if not isinstance(trades_df, pd.DataFrame):
+            try:
+                trades_df = pd.DataFrame(trades_df)
+            except Exception:
+                trades_df = pd.DataFrame()
         trades_list = trades_df.rename(columns={'pnl_net': 'pnl'}).to_dict('records')
         dd_stats = drawdown_stats(eq_series)
         mdd = dd_stats['max_drawdown_pct']
@@ -63,6 +74,11 @@ def render_comparison_dashboard():
             trades_list,
             st.session_state.ui_initial_capital,
         )
+        # Alinear Ganancia Neta Total con suma de trades, como en Resultados
+        trades_net = float(trades_df['pnl_net'].sum()) if 'pnl_net' in trades_df.columns else 0.0
+        metrics['Ganancia Neta Total ($)'] = trades_net
+        if st.session_state.ui_initial_capital:
+            metrics['Ganancia Neta Total (%)'] = (trades_net / float(st.session_state.ui_initial_capital)) * 100.0
         metrics['Max Drawdown (%)'] = mdd
         results['metrics'] = metrics
 
@@ -107,13 +123,14 @@ def render_comparison_dashboard():
 
     # Se itera sobre los items para tener acceso al nombre y al color.
     for i, (name, equity_df) in enumerate(equity_dfs.items()):
-        fig.add_trace(go.Scatter(
-            x=equity_df.index,
-            y=equity_df['equity'],
-            mode='lines',
-            name=name, # El nombre en la leyenda es la clave del diccionario
-            line=dict(color=colors[i % len(colors)]) # Asigna colores cíclicamente
-        ))
+        if isinstance(equity_df, pd.DataFrame) and not equity_df.empty and 'equity' in equity_df.columns:
+            fig.add_trace(go.Scatter(
+                x=equity_df.index,
+                y=equity_df['equity'],
+                mode='lines',
+                name=name,
+                line=dict(color=colors[i % len(colors)])
+            ))
 
     fig.update_layout(
         template="plotly_dark",
@@ -125,7 +142,10 @@ def render_comparison_dashboard():
 
     st.subheader("Curvas de Drawdown Comparadas")
     if dd_curves:
-        dd_df = pd.concat(dd_curves.values(), axis=1, keys=dd_curves.keys())
+        non_empty = {k: v for k, v in dd_curves.items() if len(v)}
+        if not non_empty:
+            return
+        dd_df = pd.concat(non_empty.values(), axis=1, keys=non_empty.keys())
         dd_df.sort_index(inplace=True)
         dd_df = dd_df.ffill()
         st.session_state.drawdown_series = dd_df
