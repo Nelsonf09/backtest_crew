@@ -521,6 +521,8 @@ def process_global_backtesting():
 
     market = st.session_state.ui_market
     market_key = ("crypto" if market == "Cryptomonedas" else market)
+    # Si usamos Datalake para crypto, evitamos conectar a IB
+    use_dl_global = bool(st.session_state.get("ui_use_datalake")) and DatalakeFeed and BridgeConfig and (market_key == "crypto")
     if market == "forex" and st.session_state.ui_primary_exchange:
         st.info("Primary Exchange no aplica en Forex y será ignorado.")
         st.session_state.ui_primary_exchange = ""
@@ -539,9 +541,10 @@ def process_global_backtesting():
     if st.session_state.ui_exchange not in exchange_list:
         st.session_state.ui_exchange = exchange_list[0]
 
-    with st.spinner("Conectando a IB..."):
-        if not dm.connect_ib():
-            st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
+    if not use_dl_global:
+        with st.spinner("Conectando a IB..."):
+            if not dm.connect_ib():
+                st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
 
     try:
         is_filter_comparison = st.session_state.ui_ema_filter == "Comparar Filtros"
@@ -643,7 +646,8 @@ def process_global_backtesting():
         st.error(f"Error en backtest global: {e}")
         st.session_state.app_fsm.transition_to(AppState.ERROR)
     finally:
-        dm.disconnect_ib()
+        if not use_dl_global:
+            dm.disconnect_ib()
 
 def process_loading_state_visual():
     dm = st.session_state.data_manager
