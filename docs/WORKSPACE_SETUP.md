@@ -309,6 +309,7 @@ streamlit run ui/app.py
 En la app:
 - Selecciona Mercado = "Cryptomonedas".
 - Abre el expander "Datalake (Opcional)", activa "Usar Datalake (Crypto)", revisa `lake_root` y `dl-source`.
+- Selecciona "Región Binance" (global/us) según el exchange que quieras usar para ingesta.
 - Define Inicio/Fin de descarga y ejecuta el backtest.
 
 Notas:

@@ -59,6 +59,29 @@ except Exception:
     BridgeConfig = None  # type: ignore
     DatalakeFeed = None  # type: ignore
 
+# Acceso directo a read_range_df e ingestor de Binance (para Fase 4)
+def _import_datalake_reader():
+    try:
+        from datalake.read.api import read_range_df  # type: ignore
+        return read_range_df
+    except Exception:
+        return None
+
+def _map_tf_to_dl(tf_label: str) -> str:
+    s = (tf_label or "").strip().lower().replace("mins", "min").replace(" ", "")
+    if s in ("1min", "1m"): return "M1"
+    if s in ("5min", "5m"): return "M5"
+    if s in ("15min", "15m"): return "M15"
+    if s in ("30min", "30m"): return "M30"
+    return "M1"
+
+def _import_binance_ingest():
+    try:
+        from datalake.ingestors.binance.ingest_cli import ingest  # type: ignore
+        return ingest
+    except Exception:
+        return None
+
 
 def ema_tf_value_to_label(value: str) -> str:
     """Devuelve la etiqueta asociada a un valor de timeframe del filtro EMA."""
@@ -361,15 +384,75 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
     if st.session_state.get("ui_use_datalake") and market_key != "crypto":
         st.info("Datalake actual soporta solo Crypto (Binance). Se usará IB para otros mercados.")
 
+    # Si Datalake está activo, validar disponibilidad y opcionalmente ingestar
+    if use_dl:
+        read_range_df = _import_datalake_reader()
+        if read_range_df is None:
+            st.error("No se pudo importar datalake.read.api.read_range_df. Revisa PYTHONPATH.")
+            st.stop()
+
+        # Rango solicitado (con warmup extendido para ejecutar/filtrar)
+        start_dt = adjusted_download_start
+        end_dt = st.session_state.ui_download_end
+        date_from_check = f"{start_dt.isoformat()}T00:00:00Z"
+        date_to_check = f"{(end_dt + datetime.timedelta(days=1)).isoformat()}T00:00:00Z"
+        dl_symbol = (st.session_state.get("ui_dl_symbol") or st.session_state.ui_symbol)
+    dl_source = st.session_state.get("ui_dl_source", "binance")
+        lake_root = st.session_state.get("ui_lake_root") or os.getenv("LAKE_ROOT", "")
+
+        with st.spinner("Verificando disponibilidad en Datalake..."):
+            df_check = read_range_df(
+                lake_root=lake_root,
+                market="crypto",
+                tf=_map_tf_to_dl(exec_tf),
+                symbol=dl_symbol,
+                date_from=date_from_check,
+                date_to=date_to_check,
+                source=dl_source,
+            )
+        if df_check is None or df_check.empty:
+            # Preguntar/ingestar automáticamente
+            st.warning("No se encontraron datos en el rango solicitado. Intentando ingestar desde Binance...")
+            ingest = _import_binance_ingest()
+            if ingest is None:
+                st.error("No se pudo importar el ingestor de Binance. Revisa PYTHONPATH del datalake.")
+                st.stop()
+            # Determinar TF(s) a ingestar: ejecución y filtro (si distinto)
+            tfs_needed = {_map_tf_to_dl(exec_tf)}
+            filt_dl = _map_tf_to_dl(filter_tf)
+            if filt_dl != list(tfs_needed)[0]:
+                tfs_needed.add(filt_dl)
+            # Iterar días de la ventana real de backtest (sin warmup para no exceder)
+            d0 = st.session_state.ui_download_start
+            d1 = st.session_state.ui_download_end
+            cur = d0
+            with st.spinner("Ingestando datos faltantes (puede tardar)..."):
+                # Asegurar que la ingesta escriba en el lake seleccionado
+                if lake_root:
+                    os.environ["LAKE_ROOT"] = lake_root
+                # Pasar región Binance (global/us) al ingestor
+                dl_region = st.session_state.get("ui_dl_region", os.getenv("BINANCE_REGION", "global"))
+                os.environ["BINANCE_REGION"] = dl_region
+                while cur <= d1:
+                    day = cur.isoformat()
+                    for tf_dl in sorted(tfs_needed):
+                        ns = type("Args", (), {
+                            "symbols": dl_symbol,
+                            "date_from": day,
+                            "date_to": day,
+                            "tf": tf_dl,
+                            "binance_region": dl_region,
+                        })()
+                        try:
+                            ingest(ns)  # escribe al lake
+                        except SystemExit:
+                            pass
+                        except Exception as e:
+                            st.warning(f"Fallo ingesta {dl_symbol} {tf_dl} {day}: {e}")
+                    cur = cur + datetime.timedelta(days=1)
+
     with st.spinner(label):
         if use_dl:
-            def _map_tf_to_dl(tf_label: str) -> str:
-                s = (tf_label or "").strip().lower().replace("mins", "min").replace(" ", "")
-                if s in ("1min", "1m"): return "M1"
-                if s in ("5min", "5m"): return "M5"
-                if s in ("15min", "15m"): return "M15"
-                if s in ("30min", "30m"): return "M30"
-                return "M1"
 
             dl_exec_tf = _map_tf_to_dl(exec_tf)
             dl_filter_tf = _map_tf_to_dl(filter_tf)
@@ -849,6 +932,7 @@ with st.sidebar:
         st.text_input("lake_root", key="ui_lake_root", placeholder="/ruta/al/lake_root", help="Si está vacío, se usa LAKE_ROOT del entorno")
         st.text_input("dl-source", key="ui_dl_source", help="Fuente dentro del lake, p.ej. binance")
         st.text_input("dl-symbol (override)", key="ui_dl_symbol", help="Dejar vacío para usar el símbolo de la UI")
+        st.selectbox("Región Binance", options=["global","us"], key="ui_dl_region", help="Elige api.binance.com (global) o api.binance.us")
         st.caption("Nota: Datalake soportado en Crypto (Binance). El rango usa Inicio/Fin Descarga en UTC.")
 
     with st.expander("2. Estrategia y Ejecución", expanded=True):

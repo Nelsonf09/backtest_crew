@@ -53,6 +53,7 @@ Si `--use-datalake` es falso/ausente, no se modifica nada del pipeline actual.
 - En la barra lateral, abre el bloque "Datalake (Opcional)".
 - Activa "Usar Datalake (Crypto)".
 - Completa `lake_root` (o exporta `LAKE_ROOT`), `dl-source` (ej. `binance`) y opcionalmente `dl-symbol`.
+- Selecciona "Región Binance": `global` (api.binance.com) o `us` (api.binance.us) para ingestas.
 - Selecciona Mercado = "Cryptomonedas" y define el rango en "Inicio/Fin Descarga"; la UI construye `[from,to)` UTC automáticamente.
 - El sistema cargará las velas de ejecución y filtro directamente del Datalake y continuará el pipeline sin cambios.
 
