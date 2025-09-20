@@ -405,42 +405,56 @@ def load_data_for_backtest(dm: DataManager, exec_tf: str, filter_tf: str) -> tup
         dl_source = st.session_state.get("ui_dl_source", "binance")
         # lake_root ya validado arriba
 
+        # Verificar disponibilidad para ambos TF: ejecución y filtro
+        dl_exec_tf = _map_tf_to_dl(exec_tf)
+        dl_filter_tf = _map_tf_to_dl(filter_tf)
         with st.spinner("Verificando disponibilidad en Datalake..."):
-            df_check = read_range_df(
+            df_exec_check = read_range_df(
                 lake_root=lake_root,
                 market="crypto",
-                tf=_map_tf_to_dl(exec_tf),
+                tf=dl_exec_tf,
                 symbol=dl_symbol,
                 date_from=date_from_check,
                 date_to=date_to_check,
                 source=dl_source,
             )
-        if df_check is None or df_check.empty:
-            # Preguntar/ingestar automáticamente
-            st.warning("No se encontraron datos en el rango solicitado. Intentando ingestar desde Binance...")
+            if dl_filter_tf == dl_exec_tf:
+                df_filter_check = df_exec_check
+            else:
+                df_filter_check = read_range_df(
+                    lake_root=lake_root,
+                    market="crypto",
+                    tf=dl_filter_tf,
+                    symbol=dl_symbol,
+                    date_from=date_from_check,
+                    date_to=date_to_check,
+                    source=dl_source,
+                )
+        missing_tfs = set()
+        if df_exec_check is None or df_exec_check.empty:
+            missing_tfs.add(dl_exec_tf)
+        if df_filter_check is None or df_filter_check.empty:
+            missing_tfs.add(dl_filter_tf)
+        if missing_tfs:
+            faltantes = ", ".join(sorted(missing_tfs))
+            st.warning(f"No se encontraron datos en el rango solicitado para: {faltantes}. Intentando ingestar desde Binance...")
             ingest = _import_binance_ingest()
             if ingest is None:
                 st.error("No se pudo importar el ingestor de Binance. Revisa PYTHONPATH del datalake.")
                 st.stop()
-            # Determinar TF(s) a ingestar: ejecución y filtro (si distinto)
-            tfs_needed = {_map_tf_to_dl(exec_tf)}
-            filt_dl = _map_tf_to_dl(filter_tf)
-            if filt_dl != list(tfs_needed)[0]:
-                tfs_needed.add(filt_dl)
             # Iterar días de la ventana real de backtest (sin warmup para no exceder)
             d0 = st.session_state.ui_download_start
             d1 = st.session_state.ui_download_end
             cur = d0
             with st.spinner("Ingestando datos faltantes (puede tardar)..."):
                 # Asegurar que la ingesta escriba en el lake seleccionado
-                # Garantizar LAKE_ROOT para el ingestor
                 os.environ["LAKE_ROOT"] = lake_root
                 # Pasar región Binance (global/us) al ingestor
                 dl_region = st.session_state.get("ui_dl_region", os.getenv("BINANCE_REGION", "global"))
                 os.environ["BINANCE_REGION"] = dl_region
                 while cur <= d1:
                     day = cur.isoformat()
-                    for tf_dl in sorted(tfs_needed):
+                    for tf_dl in sorted(missing_tfs):
                         ns = type("Args", (), {
                             "symbols": dl_symbol,
                             "date_from": day,
