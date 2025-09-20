@@ -20,13 +20,42 @@ def read_range_df(lake_root: str, market: str, tf: str, symbol: str, date_from: 
         raise ValueError("date_from y date_to requeridos en este stub")
     start = pd.to_datetime(date_from, utc=True)
     end = pd.to_datetime(date_to, utc=True)
-    year = start.year
-    month = start.month
-    df = _load_month_partition(lake_root, source, market, tf, symbol, year, month)
-    if df is None or df.empty:
+    if end <= start:
         return pd.DataFrame()
+
+    # Iterar todas las particiones mensuales que intersectan [start, end)
+    parts: list[pd.DataFrame] = []
+    cur_year = start.year
+    cur_month = start.month
+    # Determinar el último mes a incluir: mes de (end - 1ns)
+    last = (end - pd.Timedelta(nanoseconds=1))
+    last_year = last.year
+    last_month = last.month
+
+    while (cur_year < last_year) or (cur_year == last_year and cur_month <= last_month):
+        df_part = _load_month_partition(lake_root, source, market, tf, symbol, cur_year, cur_month)
+        if df_part is not None and not df_part.empty:
+            parts.append(df_part)
+        # Avanzar un mes
+        if cur_month == 12:
+            cur_month = 1
+            cur_year += 1
+        else:
+            cur_month += 1
+
+    if not parts:
+        return pd.DataFrame()
+
+    df = pd.concat(parts, ignore_index=True)
     if 'ts' not in df.columns:
         raise ValueError("Parquet sin columna ts")
     df['ts'] = pd.to_datetime(df['ts'], utc=True)
+    # Filtrado defensivo half-open [start, end)
     mask = (df['ts'] >= start) & (df['ts'] < end)
-    return df.loc[mask].copy()
+    df = df.loc[mask].copy()
+    if df.empty:
+        return df
+    # Orden y dedupe por seguridad
+    df.sort_values('ts', inplace=True)
+    df.drop_duplicates(subset='ts', keep='first', inplace=True)
+    return df
