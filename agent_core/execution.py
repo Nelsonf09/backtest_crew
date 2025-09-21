@@ -7,13 +7,25 @@ y el ciclo de vida completo de cada operación individual a través de una FSM.
 import pandas as pd
 import logging
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-import pytz
-import math
 import uuid
+import sys
+from typing import Callable, Optional
 
 # Importaciones de módulos compartidos
 from shared.timezone_handler import ensure_timezone_utc
 from shared.fsm import FSM, TradeState
+from shared.config import (
+    EXACT_MATCH_MODE,
+    TRADING_WINDOW_START,
+    TRADING_WINDOW_END,
+    FORCE_CLOSE_TIME,
+    SLIPPAGE_MODE,
+    SLIPPAGE_VALUE,
+    ALLOW_FRACTIONAL_SIZE_CRYPTO,
+)
+from shared.time_windows import is_trading_window, is_force_close
+from shared.slippage import apply_slippage
+from agent_core.position_sizing import compute_position_size
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +47,14 @@ class Trade:
     Representa una única operación de trading con su propio ciclo de vida gestionado por una FSM.
     Cada instancia de esta clase es una operación independiente.
     """
-    def __init__(self, direction: str, entry_time, entry_price: Decimal, size: int,
+    def __init__(self, direction: str, entry_time, entry_price: Decimal, size: Decimal | int | float,
                  sl_price: Decimal, tp_price: Decimal, entry_emas: dict, level_triggered: str | None):
         self.id = uuid.uuid4()
         self.fsm = FSM(TradeState.ACTIVE)
         self.direction = direction
         self.entry_time = entry_time
         self.entry_price = entry_price
-        self.size = size
+        self.size = size if isinstance(size, Decimal) else Decimal(str(size))
         self.initial_sl_price = sl_price
         self.initial_tp_price = tp_price
         self.current_sl_price = sl_price
@@ -88,7 +100,7 @@ class Trade:
         """Convierte la información del trade a un diccionario para los registros y la UI."""
         return {
             "entry_time": self.entry_time, "exit_time": self.exit_time, "direction": self.direction,
-            "size": self.size, "entry_price": float(self.entry_price) if not self.entry_price.is_nan() else None,
+            "size": float(self.size), "entry_price": float(self.entry_price) if not self.entry_price.is_nan() else None,
             "exit_price": float(self.exit_price) if not self.exit_price.is_nan() else None,
             "pnl_gross": float(self.pnl_gross) if not self.pnl_gross.is_nan() else None,
             "commission": float(self.commission) if not self.commission.is_nan() else None,
@@ -123,8 +135,14 @@ class ExecutionSimulator:
 
         self.closed_trades = []
         self.equity_history = []
-        
+
         self.account_fsm = FSM(TradeState.FLAT)
+
+        self.market: str = 'stocks'
+        self.lot_step: Optional[float] = None
+        self.min_qty: Optional[float] = None
+        self.allow_fractional_crypto: bool = ALLOW_FRACTIONAL_SIZE_CRYPTO
+        self._strategy_reset_hook: Optional[Callable[[], None]] = None
 
         logger.info(f"ExecutionSimulator (FSM) inicializado: Capital={self.initial_capital:.2f}, Leverage={self.leverage}:1")
 
@@ -134,13 +152,65 @@ class ExecutionSimulator:
         self.leverage = max(1, int(new_leverage))
         logger.info(f"Apalancamiento actualizado de {old_leverage}:1 a {self.leverage}:1.")
 
+    def configure_market(
+        self,
+        *,
+        market: Optional[str] = None,
+        lot_step: Optional[float] = None,
+        min_qty: Optional[float] = None,
+        allow_fractional_crypto: Optional[bool] = None,
+    ) -> None:
+        """Configura metadatos del mercado para cálculo de tamaño."""
+        if market:
+            self.market = market.lower()
+        if lot_step is not None:
+            self.lot_step = float(lot_step) if lot_step else None
+        if min_qty is not None:
+            self.min_qty = float(min_qty) if min_qty else None
+        if allow_fractional_crypto is not None:
+            self.allow_fractional_crypto = bool(allow_fractional_crypto)
+
+    def set_strategy_reset_hook(self, callback: Callable[[], None] | None) -> None:
+        """Permite registrar un callback para resetear la estrategia tras cerrar trades."""
+        self._strategy_reset_hook = callback
+
+    def _ensure_strategy_reset_hook(self) -> Optional[Callable[[], None]]:
+        if self._strategy_reset_hook is not None:
+            return self._strategy_reset_hook
+
+        strategy = getattr(self, 'obr_strategy', None)
+        if strategy and hasattr(strategy, 'reset'):
+            self._strategy_reset_hook = lambda s=strategy: s.reset()
+            return self._strategy_reset_hook
+
+        main_module = sys.modules.get('agent_core.main')
+        strategy = getattr(main_module, 'obr_strategy', None) if main_module else None
+        if strategy and hasattr(strategy, 'reset'):
+            self._strategy_reset_hook = lambda s=strategy: s.reset()
+        return self._strategy_reset_hook
+
+    def _on_trade_closed(self) -> None:
+        if not EXACT_MATCH_MODE:
+            return
+        hook = self._ensure_strategy_reset_hook()
+        if callable(hook):
+            try:
+                hook()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.error("Error reseteando estrategia tras cierre de trade: %s", exc, exc_info=True)
+
     def _get_execution_price(self, target_price: float, signal_type_for_slippage: str) -> Decimal:
         price_dec = quantize(target_price)
         if price_dec.is_nan(): return price_dec
+        signal_upper = (signal_type_for_slippage or '').upper()
+        if EXACT_MATCH_MODE:
+            side = 'buy' if signal_upper in ['BUY', 'COVER_SHORT'] else 'sell'
+            slipped = apply_slippage(float(price_dec), side, SLIPPAGE_MODE, SLIPPAGE_VALUE)
+            return quantize(slipped)
         if self.slippage_points > Decimal('0'):
-            if signal_type_for_slippage in ['BUY', 'COVER_SHORT']:
+            if signal_upper in ['BUY', 'COVER_SHORT']:
                 return price_dec + self.slippage_points
-            elif signal_type_for_slippage in ['SELL', 'SHORT']:
+            if signal_upper in ['SELL', 'SHORT']:
                 return max(Decimal('0.0'), price_dec - self.slippage_points)
         return price_dec
 
@@ -159,17 +229,24 @@ class ExecutionSimulator:
             logger.warning(f"Precio de entrada inválido: {entry_exec_price}. No se abre posición.")
             return None
             
-        buying_power = current_equity * Decimal(self.leverage)
-        calculated_size = math.floor(buying_power / entry_exec_price)
+        size_value = compute_position_size(
+            market=self.market,
+            equity=float(current_equity),
+            leverage=float(self.leverage),
+            entry_price=float(entry_exec_price),
+            lot_step=self.lot_step,
+            min_qty=self.min_qty,
+            allow_fractional_crypto=self.allow_fractional_crypto,
+        )
 
-        if calculated_size <= 0:
+        if size_value == 0:
             logger.info("Tamaño de posición calculado es 0. No se abre trade.")
             return None
 
         if self.cash < self.commission_per_side:
             logger.warning("Cash insuficiente para cubrir la comisión de entrada.")
             return None
-        
+
         # --- LÓGICA DE SL/TP SIMPLIFICADA ---
         # Ahora se confía 100% en los valores que vienen del diccionario de la señal.
         sl_price = quantize(signal_data.get('sl_price'))
@@ -183,23 +260,31 @@ class ExecutionSimulator:
         self.cash -= self.commission_per_side
         self.account_fsm.transition_to(TradeState.ACTIVE)
         
+        position_size_dec = Decimal(str(size_value))
+
         self.current_trade = Trade(
             direction='LONG' if signal_type == 'BUY' else 'SHORT',
             entry_time=timestamp,
             entry_price=entry_exec_price,
-            size=calculated_size,
+            size=position_size_dec,
             sl_price=sl_price,
             tp_price=tp_price,
             entry_emas=signal_data.get('emas', {}),
             level_triggered=signal_data.get('level')
         )
-        
-        logger.info(f"TRADE ABIERTO ({self.current_trade.direction}): Size={self.current_trade.size} @ {self.current_trade.entry_price:.4f}")
+
+        size_display = float(position_size_dec)
+        logger.info(
+            "TRADE ABIERTO (%s): Size=%s @ %.4f",
+            self.current_trade.direction,
+            f"{size_display:g}",
+            float(self.current_trade.entry_price),
+        )
 
         marker_color = 'lime' if self.current_trade.direction == 'LONG' else 'magenta'
         marker_shape = 'arrowUp' if self.current_trade.direction == 'LONG' else 'arrowDown'
         marker_position = 'belowBar' if self.current_trade.direction == 'LONG' else 'aboveBar'
-        marker_text = f"{self.current_trade.direction} {calculated_size} ({self.current_trade.level_triggered or ''})".strip()
+        marker_text = f"{self.current_trade.direction} {size_display:g} ({self.current_trade.level_triggered or ''})".strip()
         return {'marker': {'time': timestamp, 'position': marker_position, 'shape': marker_shape, 'color': marker_color, 'text': marker_text}}
 
     def _close_current_position(self, timestamp, exit_exec_price: Decimal, exit_reason: str) -> dict | None:
@@ -232,7 +317,9 @@ class ExecutionSimulator:
 
         self.current_trade = None
         self.account_fsm.transition_to(TradeState.FLAT)
-        
+
+        self._on_trade_closed()
+
         return result_marker
 
     def process_signal(self, signal, candle: pd.Series) -> dict | None:
@@ -250,9 +337,13 @@ class ExecutionSimulator:
             self._update_equity_history(None, timestamp)
             return None
 
+        allow_entry = True
+        if EXACT_MATCH_MODE and not is_trading_window(timestamp, TRADING_WINDOW_START, TRADING_WINDOW_END):
+            allow_entry = False
+
         if self.account_fsm.is_in_state(TradeState.ACTIVE) and self.current_trade:
             self.current_trade.update_on_candle(candle)
-            
+
             exit_reason, exit_price_trigger = self._check_sl_tp(candle)
             if exit_reason:
                 exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
@@ -270,6 +361,14 @@ class ExecutionSimulator:
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
+            if EXACT_MATCH_MODE and is_force_close(timestamp, FORCE_CLOSE_TIME):
+                exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
+                exit_exec_price = self._get_execution_price(close_price_float, exit_signal_type)
+                if not exit_exec_price.is_nan():
+                    result = self._close_current_position(timestamp, exit_exec_price, "ForceClose")
+                    self._update_equity_history(close_price_float, timestamp)
+                    return result
+
             signal_type = signal if isinstance(signal, str) else signal.get('type', 'HOLD')
             if (self.current_trade.direction == 'LONG' and signal_type == 'SELL') or \
                (self.current_trade.direction == 'SHORT' and signal_type == 'BUY'):
@@ -280,7 +379,7 @@ class ExecutionSimulator:
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
-        if self.account_fsm.is_in_state(TradeState.FLAT) and isinstance(signal, dict):
+        if allow_entry and self.account_fsm.is_in_state(TradeState.FLAT) and isinstance(signal, dict):
             signal_type = signal.get('type', 'HOLD').upper()
             if signal_type in ['BUY', 'SELL']:
                 result = self._open_position(signal, candle)

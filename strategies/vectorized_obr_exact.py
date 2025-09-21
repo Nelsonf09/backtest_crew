@@ -6,14 +6,29 @@ from typing import Dict, Tuple, Optional
 
 # Usamos la MISMA estrategia paso-a-paso para garantizar equivalencia exacta
 from .opening_br_strategy import OpeningBreakRetestStrategy
+from shared.config import (
+    EXACT_MATCH_MODE,
+    SLIPPAGE_MODE,
+    SLIPPAGE_VALUE,
+    ALLOW_FRACTIONAL_SIZE_CRYPTO,
+    TRADING_WINDOW_START,
+    TRADING_WINDOW_END,
+    FORCE_CLOSE_TIME,
+)
+from shared.slippage import apply_slippage
+from shared.time_windows import is_trading_window, is_force_close
+from agent_core.position_sizing import compute_position_size
 
 def _is_trading_window(ts: pd.Timestamp) -> bool:
-    """ Ventana de trading del motor rápido: 09:30–11:30 (hora de la vela). """
+    if EXACT_MATCH_MODE:
+        return is_trading_window(ts, TRADING_WINDOW_START, TRADING_WINDOW_END)
     h, m = ts.hour, ts.minute
     return (h == 9 and m >= 30) or (h == 10) or (h == 11 and m <= 30)
 
+
 def _force_close_time(ts: pd.Timestamp) -> bool:
-    """ Cierre forzado del motor rápido a partir de las 13:00. """
+    if EXACT_MATCH_MODE:
+        return is_force_close(ts, FORCE_CLOSE_TIME)
     return ts.hour >= 13
 
 def _to_epoch_seconds(ts: pd.Timestamp) -> float:
@@ -118,18 +133,27 @@ def run_fast_backtest_exact(
         row = df.iloc[i]
 
         if direction != 0:
-            is_closed, exit_reason, exit_price = False, 0, 0.0
+            is_closed, exit_reason = False, 0
+            exit_price_raw = 0.0
             if direction == 1:
-                if row["high"] >= current_tp: is_closed, exit_price, exit_reason = True, float(current_tp), 1
-                elif row["close"] <= current_sl: is_closed, exit_price, exit_reason = True, float(current_sl), 2
+                if row["high"] >= current_tp:
+                    is_closed, exit_price_raw, exit_reason = True, float(current_tp), 1
+                elif row["close"] <= current_sl:
+                    is_closed, exit_price_raw, exit_reason = True, float(current_sl), 2
             else:
-                if row["low"] <= current_tp: is_closed, exit_price, exit_reason = True, float(current_tp), 1
-                elif row["close"] >= current_sl: is_closed, exit_price, exit_reason = True, float(current_sl), 2
+                if row["low"] <= current_tp:
+                    is_closed, exit_price_raw, exit_reason = True, float(current_tp), 1
+                elif row["close"] >= current_sl:
+                    is_closed, exit_price_raw, exit_reason = True, float(current_sl), 2
 
             if not is_closed and _force_close_time(ts):
-                is_closed, exit_price, exit_reason = True, _quant(float(row["close"])), 3
+                is_closed, exit_price_raw, exit_reason = True, _quant(float(row["close"])), 3
 
             if is_closed:
+                exit_price = _quant(exit_price_raw)
+                if EXACT_MATCH_MODE:
+                    exit_side = 'sell' if direction == 1 else 'buy'
+                    exit_price = _quant(apply_slippage(exit_price, exit_side, SLIPPAGE_MODE, SLIPPAGE_VALUE))
                 pnl_gross = (exit_price - entry_price) * position_size if direction == 1 else (entry_price - exit_price) * position_size
                 pnl_net = pnl_gross - (commission_per_side * 2.0)
                 cash += pnl_gross
@@ -144,16 +168,15 @@ def run_fast_backtest_exact(
                     trade_count += 1
 
                 trades_today += 1
-                if stop_after_first_win and pnl_net > 0: stop_trading_for_day = True
-                # --- INICIO DE LA MODIFICACIÓN ---
-                # La lógica sigue siendo la misma, pero el valor de 'first_trade_loss_stop' ahora es dinámico.
-                elif trades_today == 1 and pnl_net <= first_trade_loss_stop: stop_trading_for_day = True
-                # --- FIN DE LA MODIFICACIÓN ---
-                elif trades_today >= max_trades_per_day: stop_trading_for_day = True
+                if stop_after_first_win and pnl_net > 0:
+                    stop_trading_for_day = True
+                elif trades_today == 1 and pnl_net <= first_trade_loss_stop:
+                    stop_trading_for_day = True
+                elif trades_today >= max_trades_per_day:
+                    stop_trading_for_day = True
 
                 direction, position_size = 0, 0.0
-                
-                # Ahora se llama al reseteo parcial, que no borra la memoria del día.
+
                 strat.reset()
 
         unrealized = 0.0
@@ -175,18 +198,28 @@ def run_fast_backtest_exact(
             if isinstance(signal, dict):
                 sig_type = str(signal.get("type", "HOLD")).upper()
                 if sig_type in ("BUY", "SELL"):
-                    entry_price = _quant(float(row["close"]))
+                    raw_entry_price = _quant(float(row["close"]))
                     direction = 1 if sig_type == "BUY" else -1
                     sl_price = _quant(float(signal.get("sl_price", np.nan)))
                     tp_price = _quant(float(signal.get("tp1_price", np.nan)))
 
-                    if not (np.isfinite(sl_price) and np.isfinite(tp_price) and entry_price > 0):
+                    if not (np.isfinite(sl_price) and np.isfinite(tp_price) and raw_entry_price > 0):
                         direction = 0
                     else:
-                        if market.lower() == "crypto":
-                            size = (equity * float(leverage)) / entry_price
-                        else:
-                            size = np.floor((equity * float(leverage)) / entry_price)
+                        entry_price = raw_entry_price
+                        if EXACT_MATCH_MODE:
+                            entry_side = 'buy' if direction == 1 else 'sell'
+                            entry_price = _quant(apply_slippage(entry_price, entry_side, SLIPPAGE_MODE, SLIPPAGE_VALUE))
+
+                        size = compute_position_size(
+                            market=market,
+                            equity=equity,
+                            leverage=float(leverage),
+                            entry_price=entry_price,
+                            lot_step=None,
+                            min_qty=None,
+                            allow_fractional_crypto=ALLOW_FRACTIONAL_SIZE_CRYPTO,
+                        )
                         if size <= 0:
                             direction = 0
                         else:
