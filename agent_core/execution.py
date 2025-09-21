@@ -118,12 +118,13 @@ class ExecutionSimulator:
     """
     def __init__(self, initial_capital: float = 10000.0,
                  commission_per_trade: float = 1.0,
-                 slippage_points: float = 0.01,
+                 slippage_points: float = 0.0,
                  leverage: int = 1,
                  max_holding_candles: int | None = None):
 
         self.initial_capital = quantize(initial_capital)
         self.commission_per_side = quantize(commission_per_trade)
+        # slippage_points mantiene compat con UI, pero EXACT_MATCH usa shared.slippage
         self.slippage_points = quantize(slippage_points)
         self.leverage = max(1, int(leverage))
         self.max_holding_candles = max_holding_candles
@@ -227,6 +228,7 @@ class ExecutionSimulator:
             side = 'buy' if signal_upper in ['BUY', 'COVER_SHORT'] else 'sell'
             slipped = apply_slippage(float(price_dec), side, SLIPPAGE_MODE, SLIPPAGE_VALUE)
             return quantize(slipped)
+        # Mantener compat previa si se usa slippage_points en otros modos
         if self.slippage_points > Decimal('0'):
             if signal_upper in ['BUY', 'COVER_SHORT']:
                 return price_dec + self.slippage_points
@@ -244,11 +246,17 @@ class ExecutionSimulator:
             logger.warning("No se puede abrir posición: Equity inválido o cero.")
             return None
 
+        # Permitir forzar precio/size desde EXACT_MATCH
+        forced_entry = signal_data.get('_force_entry_price')
         entry_exec_price = self._get_execution_price(close_price_float, signal_type)
+        if forced_entry is not None:
+            try:
+                entry_exec_price = quantize(float(forced_entry))
+            except Exception:
+                pass
         if entry_exec_price.is_nan() or entry_exec_price <= Decimal('0.0'):
             logger.warning(f"Precio de entrada inválido: {entry_exec_price}. No se abre posición.")
             return None
-            
         size_value = compute_position_size(
             market=self.market,
             equity=float(current_equity),
@@ -343,6 +351,8 @@ class ExecutionSimulator:
         return result_marker
 
     def process_signal(self, signal, candle: pd.Series) -> dict | None:
+        # EXACT_MATCH: solo evaluar/entrar dentro de ventana NY 09:30–11:30, cierre forzado 13:00
+
         timestamp = candle.name
         try:
             close_price_dec = quantize(candle['close'])
@@ -367,17 +377,41 @@ class ExecutionSimulator:
             exit_reason, exit_price_trigger = self._check_sl_tp(candle)
             if exit_reason:
                 exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
-                exit_exec_price = self._get_execution_price(float(exit_price_trigger), exit_signal_type)
+                fill_exit_price = apply_slippage(float(exit_price_trigger),
+                                                 'sell' if self.current_trade.direction == 'LONG' else 'buy',
+                                                 SLIPPAGE_MODE, SLIPPAGE_VALUE)
+                exit_exec_price = self._get_execution_price(float(fill_exit_price), exit_signal_type)
                 if not exit_exec_price.is_nan():
                     result = self._close_current_position(timestamp, exit_exec_price, exit_reason)
+                    # Reset de estrategia tras cierre
+                    try:
+                        if self.obr_strategy:
+                            self.obr_strategy.reset()
+                        else:
+                            from agent_core.main import obr_strategy as _global_strat
+                            if _global_strat: _global_strat.reset()
+                    except Exception:
+                        pass
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
             if self.max_holding_candles and self.current_trade.candles_held >= self.max_holding_candles:
                 exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
-                exit_exec_price = self._get_execution_price(close_price_float, exit_signal_type)
+                fill_exit_price = apply_slippage(float(close_price_dec),
+                                                 'sell' if self.current_trade.direction == 'LONG' else 'buy',
+                                                 SLIPPAGE_MODE, SLIPPAGE_VALUE)
+                exit_exec_price = self._get_execution_price(float(fill_exit_price), exit_signal_type)
                 if not exit_exec_price.is_nan():
                     result = self._close_current_position(timestamp, exit_exec_price, "Timeout")
+                    # Reset de estrategia tras cierre
+                    try:
+                        if self.obr_strategy:
+                            self.obr_strategy.reset()
+                        else:
+                            from agent_core.main import obr_strategy as _global_strat
+                            if _global_strat: _global_strat.reset()
+                    except Exception:
+                        pass
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
@@ -393,16 +427,67 @@ class ExecutionSimulator:
             if (self.current_trade.direction == 'LONG' and signal_type == 'SELL') or \
                (self.current_trade.direction == 'SHORT' and signal_type == 'BUY'):
                 exit_signal_type = 'SELL' if self.current_trade.direction == 'LONG' else 'BUY'
-                exit_exec_price = self._get_execution_price(close_price_float, exit_signal_type)
+                fill_exit_price = apply_slippage(float(close_price_dec),
+                                                 'sell' if self.current_trade.direction == 'LONG' else 'buy',
+                                                 SLIPPAGE_MODE, SLIPPAGE_VALUE)
+                exit_exec_price = self._get_execution_price(float(fill_exit_price), exit_signal_type)
                 if not exit_exec_price.is_nan():
                     result = self._close_current_position(timestamp, exit_exec_price, f"Signal_{signal_type}")
+                    # Reset de estrategia tras cierre
+                    try:
+                        if self.obr_strategy:
+                            self.obr_strategy.reset()
+                        else:
+                            from agent_core.main import obr_strategy as _global_strat
+                            if _global_strat: _global_strat.reset()
+                    except Exception:
+                        pass
                     self._update_equity_history(close_price_float, timestamp)
                     return result
 
         if allow_entry and self.account_fsm.is_in_state(TradeState.FLAT) and isinstance(signal, dict):
             signal_type = signal.get('type', 'HOLD').upper()
+            # Adoptar market para sizing EXACT_MATCH
+            try:
+                if 'market' in signal and signal['market']:
+                    self.market = signal['market']
+            except Exception:
+                pass
             if signal_type in ['BUY', 'SELL']:
-                result = self._open_position(signal, candle)
+                # Recalcular precio de entrada y aplicar slippage EXACT_MATCH
+                entry_price = float(close_price_dec)
+                side = 'buy' if signal_type == 'BUY' else 'sell'
+                fill_entry_price = apply_slippage(entry_price, side, SLIPPAGE_MODE, SLIPPAGE_VALUE)
+
+                # Sizing EXACT_MATCH
+                eq_val = float(self.get_equity(close_price_float)) if not self.get_equity(close_price_float).is_nan() else 0.0
+                size_val = compute_position_size(
+                    market=(self.market or 'stocks'),
+                    equity=eq_val,
+                    leverage=self.leverage,
+                    entry_price=fill_entry_price,
+                    lot_step=getattr(self, 'lot_step', None),
+                    min_qty=getattr(self, 'min_qty', None),
+                    allow_fractional_crypto=ALLOW_FRACTIONAL_SIZE_CRYPTO,
+                )
+                if not size_val or size_val <= 0:
+                    self._update_equity_history(close_price_float, timestamp)
+                    return None
+
+                # Abrir usando flujo estándar pero forzando tamaño/precio
+                open_marker = self._open_position({
+                    **signal,
+                    '_force_size': size_val,
+                    '_force_entry_price': fill_entry_price,
+                }, candle)
+                if self.current_trade:
+                    # Sobrescribir tamaño y precio de entrada para EXACT_MATCH
+                    self.current_trade.entry_price = quantize(fill_entry_price)
+                    try:
+                        self.current_trade.size = int(size_val)
+                    except Exception:
+                        self.current_trade.size = size_val
+                result = open_marker
                 self._update_equity_history(close_price_float, timestamp)
                 return result
 

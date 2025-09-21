@@ -8,34 +8,33 @@ Mode = Literal["points", "percent", "none"]
 
 
 def apply_slippage(price: float, side: Side, mode: Mode, value: float) -> float:
-    """Apply slippage to *price* according to *side* and *mode*.
+    """Apply slippage to price according to side and mode.
 
-    A ``buy`` order worsens the fill by increasing the price, while a ``sell`` order
-    worsens it by decreasing the price. When ``mode`` is ``'none'`` or ``value`` is
-    zero the input price is returned unchanged.
+    - buy: increases the price by points/percent
+    - sell: decreases the price by points/percent (clamped to >=0)
+    - none: returns the price unchanged
     """
     if price is None:
         raise ValueError("Price must be provided to compute slippage")
 
     mode_normalized = (mode or "none").lower()
     side_normalized = (side or "").lower()
-    if mode_normalized == "none" or value == 0:
+    if mode_normalized == "none" or float(value) == 0.0:
         return float(price)
     if side_normalized not in {"buy", "sell"}:
         raise ValueError(f"Unsupported side '{side}'. Expected 'buy' or 'sell'.")
 
-    slippage_amount: float
     if mode_normalized == "points":
-        slippage_amount = abs(float(value))
+        adj = abs(float(value))
     elif mode_normalized == "percent":
-        slippage_amount = abs(float(price) * float(value))
+        adj = abs(float(price) * float(value))
     else:
         raise ValueError(f"Unsupported slippage mode '{mode}'.")
 
     if side_normalized == "buy":
-        return float(price) + slippage_amount
-    adjusted = float(price) - slippage_amount
-    return adjusted if adjusted > 0 else 0.0
+        return float(price) + adj
+    out = float(price) - adj
+    return out if out > 0 else 0.0
 
 
 __all__ = ["apply_slippage"]

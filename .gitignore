@@ -88,3 +88,6 @@ playwright/.cache/
 
 # Ignore local artifacts
 .tmp/
+
+# Vendor data (datalake dumps)
+vendor/datalake/data/

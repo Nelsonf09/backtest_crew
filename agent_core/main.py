@@ -90,6 +90,9 @@ def handle_signal_request(historical_data: pd.DataFrame, current_levels: dict, r
         
     try:
         sanitized_signal = convert_numpy_types(signal)
+        # Propagar market para EXACT_MATCH sizing en el simulador paso a paso
+        if isinstance(sanitized_signal, dict) and market:
+            sanitized_signal['market'] = market
         signal_input = json.dumps(sanitized_signal)
         inputs = {"signal": signal_input}
         result = deterministic_crew.kickoff(inputs=inputs)

@@ -34,10 +34,7 @@ def compute_position_size(
     market_lower = (market or "").lower()
     fractional_allowed = market_lower == "crypto" and allow_fractional_crypto
 
-    size = _quantize_step(raw_size, lot_step if fractional_allowed else lot_step or 1.0)
-
-    if not fractional_allowed:
-        size = float(floor(size)) if lot_step is None or lot_step == 1 else size
+    size = _quantize_step(raw_size, lot_step if fractional_allowed else (lot_step or 1.0))
 
     if min_qty and min_qty > 0 and size < float(min_qty):
         return 0

@@ -33,20 +33,21 @@ class OpeningBreakRetestStrategy(BaseStrategy):
 
         self.level_fsms = {}
         self.last_levels_processed = None
-
         logger.debug("Estrategia OBR (FSM) inicializada (versión con EMAs pre-calculadas).")
 
     def reset_for_new_day(self):
         self.level_fsms = {}
         self.last_levels_processed = None
         self._or_ready_ts = None
-        self._or_ready_day = None
+    self._or_ready_day = None
         logger.debug("Estrategia OBR (FSM) reseteada para un nuevo día.")
 
     def reset(self):
         if not self.level_fsms: return
         for fsm in self.level_fsms.values(): fsm.reset()
         logger.debug(f"FSMs de niveles reseteadas a estado IDLE.")
+    self._or_ready_ts = None
+    self._or_ready_day = None
 
     def _initialize_fsms(self, current_day_levels: dict):
         if current_day_levels == self.last_levels_processed: return
@@ -78,7 +79,6 @@ class OpeningBreakRetestStrategy(BaseStrategy):
 
         current_candle, previous_candle = data.iloc[-1], data.iloc[-2]
         current_candle_idx = daily_candle_index if daily_candle_index != -1 else len(data) - 1
-
         for level_name, fsm in self.level_fsms.items():
             if self._should_guard_or_level(level_name, current_candle.name):
                 continue
@@ -113,7 +113,16 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         tp_price = entry_price + (risk_distance * self.risk_reward_ratio) if signal_type == 'BUY' else entry_price - (risk_distance * self.risk_reward_ratio)
 
         ema_values = {f'EMA_{p}': current_candle.get(f'EMA_{p}') for p in self.ema_periods}
-        final_signal = {'type': signal_type, 'sl_price': float(sl_price), 'tp1_price': float(tp_price), 'level': level_name, 'emas': ema_values}
+        # Propagar market si está disponible en parámetros
+        market = self.params.get('market') or self.params.get('market_type')
+        final_signal = {
+            'type': signal_type,
+            'sl_price': float(sl_price),
+            'tp1_price': float(tp_price),
+            'level': level_name,
+            'emas': ema_values,
+            'market': market or None,
+        }
         logger.info(f"SEÑAL FINAL GENERADA por FSM-{level_name}: {final_signal}")
         
         for fsm in self.level_fsms.values(): fsm.state = State.SIGNAL_EMITTED
