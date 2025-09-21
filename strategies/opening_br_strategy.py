@@ -19,20 +19,28 @@ class OpeningBreakRetestStrategy(BaseStrategy):
         self.ema_periods = self.params.get('ema_periods', [9, 21, 50])
         self.ema_filter_mode = self.params.get('ema_filter_mode', 'Desactivado').capitalize()
         self.use_ema_filter = self.ema_filter_mode != 'Desactivado'
-        
+
         self.sl_method = self.params.get('sl_method', 'LOOKBACK_MIN_MAX').upper()
         self.sl_default_lookback_candles = max(1, int(self.params.get('sl_lookback', 2)) + 1)
         self.sl_reduced_lookback_candles = 2
         self.risk_reward_ratio = self.params.get('risk_reward_ratio', 2.0)
 
+        self.or_guard_enabled = bool(self.params.get('or_guard_enabled', False))
+        self.or_exec_minutes = int(self.params.get('or_exec_minutes', 10))
+        self.or_tz = self.params.get('or_tz', 'America/New_York')
+        self._or_ready_ts: pd.Timestamp | None = None
+        self._or_ready_day: pd.Timestamp | None = None
+
         self.level_fsms = {}
         self.last_levels_processed = None
-        
+
         logger.debug("Estrategia OBR (FSM) inicializada (versión con EMAs pre-calculadas).")
 
     def reset_for_new_day(self):
         self.level_fsms = {}
         self.last_levels_processed = None
+        self._or_ready_ts = None
+        self._or_ready_day = None
         logger.debug("Estrategia OBR (FSM) reseteada para un nuevo día.")
 
     def reset(self):
@@ -45,7 +53,9 @@ class OpeningBreakRetestStrategy(BaseStrategy):
 
         logger.info(f"Inicializando FSMs para nuevos niveles: {current_day_levels}")
         self.level_fsms = {}
-        
+        self._or_ready_ts = None
+        self._or_ready_day = None
+
         orh, orl = current_day_levels.get('ORH'), current_day_levels.get('ORL')
         high_levels, low_levels = ['ORH', 'PMH', 'PDH'], ['ORL', 'PML', 'PDL']
 
@@ -68,8 +78,10 @@ class OpeningBreakRetestStrategy(BaseStrategy):
 
         current_candle, previous_candle = data.iloc[-1], data.iloc[-2]
         current_candle_idx = daily_candle_index if daily_candle_index != -1 else len(data) - 1
-        
+
         for level_name, fsm in self.level_fsms.items():
+            if self._should_guard_or_level(level_name, current_candle.name):
+                continue
             if fsm.state not in [State.SIGNAL_EMITTED, State.INVALIDATED]:
                 signal_info = fsm.process_candle(current_candle, previous_candle, current_candle_idx)
                 if signal_info:
@@ -184,4 +196,63 @@ class OpeningBreakRetestStrategy(BaseStrategy):
             if self.ema_filter_mode == 'Fuerte': return strong
             if self.ema_filter_mode == 'Moderado': return moderate
         return False
+
+    def _should_guard_or_level(self, level_name: str, candle_ts) -> bool:
+        if not self.or_guard_enabled or level_name not in ('ORH', 'ORL'):
+            return False
+        if candle_ts is None:
+            return False
+
+        ready_ts = self._ensure_or_guard_ready_ts(candle_ts)
+        if ready_ts is None:
+            return False
+
+        try:
+            ts = pd.Timestamp(candle_ts)
+            if ready_ts.tzinfo is not None:
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize(ready_ts.tz)
+                else:
+                    ts = ts.tz_convert(ready_ts.tz)
+        except Exception:
+            return False
+
+        if ts < ready_ts:
+            logger.debug(f"Guard OR activo: se omite {level_name} en {ts} (< {ready_ts})")
+            return True
+        return False
+
+    def _ensure_or_guard_ready_ts(self, candle_ts) -> pd.Timestamp | None:
+        if not self.or_guard_enabled or candle_ts is None:
+            return None
+
+        try:
+            ts = pd.Timestamp(candle_ts)
+        except Exception:
+            return None
+
+        tz_name = getattr(self, 'or_tz', 'America/New_York') or 'America/New_York'
+
+        try:
+            if ts.tzinfo is None:
+                ts = ts.tz_localize(tz_name)
+            else:
+                ts = ts.tz_convert(tz_name)
+        except Exception:
+            return None
+
+        day_anchor = ts.normalize()
+        if self._or_ready_day is not None and day_anchor == self._or_ready_day:
+            return self._or_ready_ts
+
+        try:
+            exec_minutes = int(self.or_exec_minutes)
+        except Exception:
+            exec_minutes = 10
+        exec_minutes = max(0, exec_minutes)
+
+        or_start = day_anchor + pd.Timedelta(hours=9, minutes=30)
+        self._or_ready_ts = or_start + pd.Timedelta(minutes=exec_minutes)
+        self._or_ready_day = day_anchor
+        return self._or_ready_ts
 

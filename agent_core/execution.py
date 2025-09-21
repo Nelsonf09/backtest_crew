@@ -146,6 +146,8 @@ class ExecutionSimulator:
 
         logger.info(f"ExecutionSimulator (FSM) inicializado: Capital={self.initial_capital:.2f}, Leverage={self.leverage}:1")
 
+        self._activate_or_guard_if_available()
+
     def set_leverage(self, new_leverage: int):
         """Permite actualizar el apalancamiento dinámicamente."""
         old_leverage = self.leverage
@@ -188,6 +190,24 @@ class ExecutionSimulator:
         if strategy and hasattr(strategy, 'reset'):
             self._strategy_reset_hook = lambda s=strategy: s.reset()
         return self._strategy_reset_hook
+
+    def _activate_or_guard_if_available(self) -> None:
+        strategy = getattr(self, 'obr_strategy', None)
+        if strategy is None:
+            main_module = sys.modules.get('agent_core.main')
+            strategy = getattr(main_module, 'obr_strategy', None) if main_module else None
+            if strategy is not None:
+                self.obr_strategy = strategy
+
+        if not strategy:
+            return
+
+        try:
+            strategy.or_guard_enabled = True
+            strategy.or_exec_minutes = 10
+            strategy.or_tz = 'America/New_York'
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug("No se pudo activar el guard de OR para la estrategia: %s", exc)
 
     def _on_trade_closed(self) -> None:
         if not EXACT_MATCH_MODE:
