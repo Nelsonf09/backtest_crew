@@ -802,18 +802,23 @@ def process_and_prepare_daily_data_visual():
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
 
     df_full_day_utc = pd.concat([df_context_utc, df_replay_utc])
-    # Enriquecer usando el TF de filtro seleccionado (paridad con motor rápido)
+    # Enriquecer sobre TODO el histórico cargado (paridad con motor rápido), luego recortar a contexto+día
     try:
         df_filter_all = st.session_state.get('all_data_filter_utc', pd.DataFrame())
-        if not df_filter_all.empty:
-            # Recortar filtro al rango extendido (contexto + día)
-            df_filter_slice = df_filter_all[(df_filter_all.index >= df_full_day_utc.index.min()) & (df_filter_all.index <= df_full_day_utc.index.max())]
+        if df_filter_all is not None and not df_filter_all.empty:
+            df_enriched_full = add_technical_indicators(st.session_state.all_data_utc, df_filter_all, market=market_key, or_window=st.session_state.get('or_window'))
         else:
-            df_filter_slice = None
-        df_enriched = add_technical_indicators(df_full_day_utc, df_filter_slice, market=market_key, or_window=st.session_state.get('or_window'))
+            df_enriched_full = add_technical_indicators(st.session_state.all_data_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
+        # Recortar al rango del día+contexto ya definido
+        df_enriched = df_enriched_full.loc[df_full_day_utc.index.intersection(df_enriched_full.index)]
     except Exception as e:
-        logger.warning(f"Fallo enriqueciendo con TF filtro; usando exec-only. Causa: {e}")
-        df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
+        logger.warning(f"Fallo enriqueciendo histórico completo; usando subconjunto. Causa: {e}")
+        try:
+            df_filter_slice = None if df_filter_all is None or df_filter_all.empty else df_filter_all[(df_filter_all.index >= df_full_day_utc.index.min()) & (df_filter_all.index <= df_full_day_utc.index.max())]
+            df_enriched = add_technical_indicators(df_full_day_utc, df_filter_slice, market=market_key, or_window=st.session_state.get('or_window'))
+        except Exception as e2:
+            logger.warning(f"Fallback exec-only en subconjunto; causa: {e2}")
+            df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
     
     df_context_enriched = df_enriched.loc[df_context_utc.index]
     df_replay_enriched = df_enriched.loc[df_replay_utc.index]
