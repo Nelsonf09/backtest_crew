@@ -237,12 +237,15 @@ Se recomiendan dos opciones para manejar dependencias: `venv` (incluido en Pytho
   - Crear y activar entorno (venv):
 
     ```bash
-    cd /path/to/backtest_crew-datalake
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -U pip
+    cd C:\work\backtest_crew   
+    ..\.venv\Scripts\Activate.ps1
+    git switch feat/bridge-datalake
+    git fetch origin
+    git pull --rebase    
+    pip install -e .      
     pip install -r requirements.txt
-    ```
+    streamlit run ui/app.py
+   
 
   - Usando `poetry`:
 
