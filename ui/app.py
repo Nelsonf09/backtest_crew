@@ -684,57 +684,115 @@ def process_loading_state_visual():
     dm = st.session_state.data_manager
     st.session_state.session_trades, st.session_state.performance_metrics = [], {}
     st.session_state.executor = ExecutionSimulator(initial_capital=st.session_state.ui_initial_capital, leverage=st.session_state.ui_leverage)
-    with st.spinner("Conectando a IB..."):
-        if not dm.connect_ib(): st.error("Fallo la conexión a IB."); st.session_state.app_fsm.transition_to(AppState.ERROR); return
-    try:
-        lookback_days = datetime.timedelta(days=30)
-        adjusted_download_start = st.session_state.ui_download_start - lookback_days
-        market_key = (
-            "crypto" if st.session_state.ui_market == "Cryptomonedas"
-            else st.session_state.ui_market
-        )
 
-        with st.spinner(f"Cargando datos para {st.session_state.ui_symbol}..."):
-            st.session_state.all_data_utc = dm.get_main_data(
-                symbol=st.session_state.ui_symbol, timeframe=st.session_state.ui_timeframe,
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
-                currency=st.session_state.ui_currency, rth=st.session_state.ui_use_rth,
-                what_to_show=st.session_state.ui_what_to_show,
-                download_start_date=adjusted_download_start,
-                download_end_date=st.session_state.ui_download_end,
-                use_cache=st.session_state.ui_use_cache, primary_exchange=st.session_state.ui_primary_exchange,
-                market=market_key,
-            )
-        if st.session_state.all_data_utc.empty: st.warning("No se obtuvieron datos."); st.session_state.app_fsm.transition_to(AppState.CONFIGURING); return
+    # Unificar carga usando el mismo flujo que el motor rápido (con soporte Datalake)
+    try:
+        # Determinar TFs: ejecución = visual; filtro = selección EMA
+        exec_tf = st.session_state.ui_timeframe
+        filter_tf = ema_tf_value_to_label(st.session_state.ema_filter_timeframe)
+
+        # Conectar a IB si no se usa Datalake (para stocks/forex)
+        market_key = ("crypto" if st.session_state.ui_market == "Cryptomonedas" else st.session_state.ui_market)
+        use_dl_visual = bool(st.session_state.get("ui_use_datalake")) and (market_key == "crypto") and (DatalakeFeed is not None) and (BridgeConfig is not None)
+        if not use_dl_visual:
+            with st.spinner("Conectando a IB..."):
+                if not dm.connect_ib():
+                    st.error("Fallo la conexión a IB.")
+                    st.session_state.app_fsm.transition_to(AppState.ERROR)
+                    return
+
+        with st.spinner(f"Cargando datos para {st.session_state.ui_symbol} (Visual)..."):
+            df_exec_raw, df_filter_raw = load_data_for_backtest(dm, exec_tf, filter_tf)
+
+        if df_exec_raw.empty:
+            st.warning("No se obtuvieron datos.")
+            st.session_state.app_fsm.transition_to(AppState.CONFIGURING)
+            return
+
+        # Guardar ambos en sesión (para enriquecer con EMAs del TF de filtro)
+        st.session_state.all_data_utc = df_exec_raw
+        st.session_state.all_data_filter_utc = df_filter_raw if df_filter_raw is not None else pd.DataFrame()
         st.session_state.app_fsm.transition_to(AppState.READY)
-    except Exception as e: st.error(f"Error cargando datos: {e}"); st.session_state.app_fsm.transition_to(AppState.ERROR)
+    except Exception as e:
+        logger.error(f"Error cargando datos (Visual): {e}", exc_info=True)
+        st.error(f"Error cargando datos: {e}")
+        st.session_state.app_fsm.transition_to(AppState.ERROR)
+    finally:
+        if not use_dl_visual:
+            dm.disconnect_ib()
 
 def process_and_prepare_daily_data_visual():
     date_to_replay = st.session_state.ui_replay_start_date
     market_key = ("crypto" if st.session_state.ui_market == "Cryptomonedas" else st.session_state.ui_market)
     handle_signal_request(None, None, reset_strategy=True, or_window=st.session_state.get('or_window'), market=market_key)
     dm = st.session_state.data_manager
-    
+
+    # Calcular niveles: si Datalake (crypto) está activo, derivar de los datos; si no, usar IB como antes
+    use_dl_visual = bool(st.session_state.get("ui_use_datalake")) and (market_key == "crypto") and (DatalakeFeed is not None) and (BridgeConfig is not None)
     with st.spinner("Obteniendo niveles del día..."):
-        if not dm.connect_ib():
-            st.error("Fallo la conexión a IB para obtener los niveles del día.")
-            st.session_state.app_fsm.transition_to(AppState.ERROR)
-            return
-        try:
-            market_key = (
-                "crypto" if st.session_state.ui_market == "Cryptomonedas"
-                else st.session_state.ui_market
-            )
-            df_prev, df_pm = dm.get_levels_data(
-                target_date=date_to_replay, symbol=st.session_state.ui_symbol,
-                sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
-                currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
-                primary_exchange=st.session_state.ui_primary_exchange,
-                market=market_key,
-            )
-            st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
-        finally:
-            dm.disconnect_ib()
+        if use_dl_visual:
+            # Derivar PDH/PDL y PMH/PML desde los datos ya descargados
+            try:
+                # Ventana del día en UTC (posteriormente convertimos a display tz más abajo)
+                tz_handler_tmp = TimezoneHandler(default_display_tz_str=st.session_state.ui_display_tz)
+                tz_handler_tmp.set_display_timezone(st.session_state.ui_display_tz)
+                start_utc_tmp = tz_handler_tmp.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.min)).astimezone(pytz.utc)
+                end_utc_tmp = tz_handler_tmp.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.max)).astimezone(pytz.utc)
+
+                all_exec = st.session_state.all_data_utc
+                df_day_utc = all_exec[(all_exec.index >= start_utc_tmp) & (all_exec.index <= end_utc_tmp)]
+
+                prev_day = date_to_replay - datetime.timedelta(days=1)
+                prev_start = tz_handler_tmp.display_tz.localize(datetime.datetime.combine(prev_day, datetime.time.min)).astimezone(pytz.utc)
+                prev_end = tz_handler_tmp.display_tz.localize(datetime.datetime.combine(prev_day, datetime.time.max)).astimezone(pytz.utc)
+                df_prev = all_exec[(all_exec.index >= prev_start) & (all_exec.index <= prev_end)]
+
+                # Premarket = antes de la primera vela de la ventana OR del día
+                try:
+                    df_day_marked = stamp_liquidity_window(df_day_utc.copy(), market_key, st.session_state.get('or_window'))
+                    if 'in_opening_window' in df_day_marked.columns and df_day_marked['in_opening_window'].any():
+                        first_or_idx = df_day_marked.index[df_day_marked['in_opening_window']].min()
+                        df_pm = df_day_marked[df_day_marked.index < first_or_idx]
+                    else:
+                        df_pm = df_day_marked.iloc[0:0]
+                except Exception:
+                    df_pm = df_day_utc.iloc[0:0]
+
+                st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+            except Exception as e:
+                logger.warning(f"No se pudieron derivar niveles desde Datalake: {e}. Fallback IB.")
+                # Fallback a IB si algo falla
+                if not dm.connect_ib():
+                    st.error("Fallo la conexión a IB para obtener los niveles del día.")
+                    st.session_state.app_fsm.transition_to(AppState.ERROR)
+                    return
+                try:
+                    df_prev, df_pm = dm.get_levels_data(
+                        target_date=date_to_replay, symbol=st.session_state.ui_symbol,
+                        sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+                        currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+                        primary_exchange=st.session_state.ui_primary_exchange,
+                        market=market_key,
+                    )
+                    st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+                finally:
+                    dm.disconnect_ib()
+        else:
+            if not dm.connect_ib():
+                st.error("Fallo la conexión a IB para obtener los niveles del día.")
+                st.session_state.app_fsm.transition_to(AppState.ERROR)
+                return
+            try:
+                df_prev, df_pm = dm.get_levels_data(
+                    target_date=date_to_replay, symbol=st.session_state.ui_symbol,
+                    sec_type=st.session_state.ui_sec_type, exchange=st.session_state.ui_exchange,
+                    currency=st.session_state.ui_currency, use_cache=st.session_state.ui_use_cache,
+                    primary_exchange=st.session_state.ui_primary_exchange,
+                    market=market_key,
+                )
+                st.session_state.static_levels = {**dm.calculate_pdh_pdl(df_prev), **dm.calculate_pmh_pml(df_pm)}
+            finally:
+                dm.disconnect_ib()
 
     st.session_state.tz_handler.set_display_timezone(st.session_state.ui_display_tz)
     start_utc = st.session_state.tz_handler.display_tz.localize(datetime.datetime.combine(date_to_replay, datetime.time.min)).astimezone(pytz.utc)
@@ -744,7 +802,18 @@ def process_and_prepare_daily_data_visual():
     df_replay_utc = st.session_state.all_data_utc[(st.session_state.all_data_utc.index >= start_utc) & (st.session_state.all_data_utc.index <= end_utc)]
 
     df_full_day_utc = pd.concat([df_context_utc, df_replay_utc])
-    df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
+    # Enriquecer usando el TF de filtro seleccionado (paridad con motor rápido)
+    try:
+        df_filter_all = st.session_state.get('all_data_filter_utc', pd.DataFrame())
+        if not df_filter_all.empty:
+            # Recortar filtro al rango extendido (contexto + día)
+            df_filter_slice = df_filter_all[(df_filter_all.index >= df_full_day_utc.index.min()) & (df_filter_all.index <= df_full_day_utc.index.max())]
+        else:
+            df_filter_slice = None
+        df_enriched = add_technical_indicators(df_full_day_utc, df_filter_slice, market=market_key, or_window=st.session_state.get('or_window'))
+    except Exception as e:
+        logger.warning(f"Fallo enriqueciendo con TF filtro; usando exec-only. Causa: {e}")
+        df_enriched = add_technical_indicators(df_full_day_utc, ema_periods=[9,21,50], market=market_key, or_window=st.session_state.get('or_window'))
     
     df_context_enriched = df_enriched.loc[df_context_utc.index]
     df_replay_enriched = df_enriched.loc[df_replay_utc.index]
@@ -764,6 +833,10 @@ def process_and_prepare_daily_data_visual():
     
     st.session_state.current_index = 0
     st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = [], [], {}
+    # Reglas de día para paridad con motor rápido
+    st.session_state.daily_trade_count = 0
+    st.session_state.daily_first_win_done = False
+    st.session_state.daily_first_trade_loss_stop_amount = -abs((st.session_state.ui_initial_capital * st.session_state.ui_first_trade_loss_stop_pct) / 100.0)
     st.session_state.app_fsm.transition_to(AppState.PAUSED)
 
 def recompute_performance_metrics():
@@ -1088,7 +1161,20 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
         levels = {**st.session_state.static_levels, **st.session_state.opening_levels}
         
         ema_filter = st.session_state.ui_ema_filter if st.session_state.ui_ema_filter != "Comparar Filtros" else "Desactivado"
-        signal = handle_signal_request(
+
+        # Aplicar reglas del motor rápido: máximo 2 trades/día, stop tras primer win o pérdida fuerte del primer trade
+        force_hold = False
+        if st.session_state.get('daily_trade_count', 0) >= 2:
+            force_hold = True
+        if st.session_state.get('daily_first_win_done', False):
+            force_hold = True
+        # Si hubo un primer trade y fue una pérdida superior al umbral, detener
+        if st.session_state.get('session_trades'):
+            first_trade_pnl = st.session_state.session_trades[0].get('pnl_net', st.session_state.session_trades[0].get('pnl', 0.0))
+            if first_trade_pnl is not None and first_trade_pnl <= st.session_state.get('daily_first_trade_loss_stop_amount', float('-inf')):
+                force_hold = True
+
+        signal = 'HOLD' if force_hold else handle_signal_request(
             historical_data=df_hist_context, 
             current_levels={k:v for k,v in levels.items() if pd.notna(v)}, 
             ema_filter_mode=ema_filter,
@@ -1104,6 +1190,11 @@ elif fsm.state in [AppState.PAUSED, AppState.REPLAYING, AppState.FINISHED]:
             if 'trade' in result:
                 trade_info = result['trade']
                 st.session_state.session_trades.append(trade_info)
+                # Actualizar contadores/flags de día
+                st.session_state.daily_trade_count = st.session_state.get('daily_trade_count', 0) + 1
+                pnl_val = trade_info.get('pnl_net', trade_info.get('pnl'))
+                if pnl_val is not None and pnl_val > 0:
+                    st.session_state.daily_first_win_done = True
                 st.session_state.last_closed_trade_levels = {
                     'SL': trade_info.get('sl_at_entry'),
                     'TP': trade_info.get('tp_at_entry')
