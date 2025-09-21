@@ -828,13 +828,19 @@ def process_and_prepare_daily_data_visual():
     
     if not st.session_state.df_replay_display.empty:
         try:
-            or_start_time = st.session_state.tz_handler.market_open_time
-            or_start_dt = st.session_state.df_replay_display.index[0].replace(hour=or_start_time.hour, minute=or_start_time.minute, second=0, microsecond=0)
-            or_end_dt = or_start_dt + datetime.timedelta(minutes=5)
-            or_candles = st.session_state.df_replay_display[(st.session_state.df_replay_display.index >= or_start_dt) & (st.session_state.df_replay_display.index < or_end_dt)]
-            if not or_candles.empty: st.session_state.opening_levels = {'ORH': or_candles['high'].max(), 'ORL': or_candles['low'].min()}
-            else: st.session_state.opening_levels = {}
-        except Exception as e: logger.error(f"Error calculando ORH/ORL: {e}"); st.session_state.opening_levels = {}
+            # Alinear con motor rápido: calcular OR desde la ventana real estampada (in_opening_window)
+            df_day_marked = st.session_state.df_replay_display
+            if 'in_opening_window' in df_day_marked.columns:
+                or_candles = df_day_marked[df_day_marked['in_opening_window']]
+                if not or_candles.empty:
+                    st.session_state.opening_levels = {'ORH': or_candles['high'].max(), 'ORL': or_candles['low'].min()}
+                else:
+                    st.session_state.opening_levels = {}
+            else:
+                st.session_state.opening_levels = {}
+        except Exception as e:
+            logger.error(f"Error calculando ORH/ORL: {e}")
+            st.session_state.opening_levels = {}
     
     st.session_state.current_index = 0
     st.session_state.markers, st.session_state.executor.closed_trades, st.session_state.last_closed_trade_levels = [], [], {}
