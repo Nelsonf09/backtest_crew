@@ -1,0 +1,497 @@
+//@version=5
+strategy("BR_Fast_Exact_v1", overlay=true, calc_on_every_tick=true, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.0, slippage=0, pyramiding=0, process_orders_on_close=false, default_qty_type=strategy.cash, default_qty_value=1000)
+
+// ===========================================================================
+//  Break & Retest (B&R) - Motor rápido vectorizado (paridad 1:1 sin EMAs)
+// ---------------------------------------------------------------------------
+//  Este script replica la máquina de estados finita (FSM) usada por el motor
+//  rápido vectorizado del repositorio backtest_crew. Se implementan los mismos
+//  estados y transiciones: IDLE -> BROKEN -> IN_RETEST_WINDOW -> SIGNAL_EMITTED
+//  con la misma lógica de ruptura, retest, confirmación y gestión básica.
+//  Los filtros EMA están desactivados por defecto para respetar la versión
+//  "sin EMAs" solicitada. Cada condición está comentada con su equivalente
+//  en Python (OpeningBreakRetestStrategy + LevelFSM).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+//  Entradas principales (mapeadas a parámetros del motor rápido)
+// ---------------------------------------------------------------------------
+ignore_ema_filters = input.bool(true, "Ignorar filtros EMA (debe permanecer en true)")
+// Nota: la versión rápida ignora EMAs cuando este flag está activo; en Pine se omite cualquier filtro EMA.
+use_or_guard = input.bool(false, "Habilitar guardia OR (equivalente a or_guard_enabled)")
+or_guard_minutes = input.int(10, "Minutos de guardia OR", minval=0, maxval=120)
+
+market_tz = input.timezone("America/New_York", "Zona horaria de mercado (TZ equivalente al motor)")
+
+// Ventana OR (equivalente a or_exec_minutes y cálculo de OR en motor)
+or_start_hour = input.int(9, "Hora inicio OR", minval=0, maxval=23)
+or_start_minute = input.int(30, "Minuto inicio OR", minval=0, maxval=59)
+or_window_minutes = input.int(5, "Duración ventana OR (min)", minval=1, maxval=240)
+
+// Tolerancias por nivel (equivalente a level_ranges)
+or_tolerance = input.float(0.2, "Tolerancia retest ORH/ORL", step=0.01, minval=0.0)
+pdh_tolerance = input.float(0.5, "Tolerancia retest PDH/PDL", step=0.01, minval=0.0)
+pmh_tolerance = input.float(0.3, "Tolerancia retest PMH/PML", step=0.01, minval=0.0)
+
+// Control FSM (equivalente a max_retest_candles)
+max_retest_candles = input.int(15, "Máximo de velas para retest", minval=1, maxval=60)
+
+// Gestión de riesgo (equivalente a sl_method, sl_lookback, risk_reward_ratio)
+sl_method = input.string("LOOKBACK_MIN_MAX", "Método de SL", options=["LOOKBACK_MIN_MAX", "BREAK_LOW_HIGH"])
+sl_lookback = input.int(2, "Velas de lookback para SL", minval=0, maxval=10)
+risk_reward_ratio = input.float(2.0, "Relación TP:SL", step=0.1, minval=0.1)
+
+// Parámetros de ejecución idénticos al motor rápido
+leverage_input = input.float(5.0, "Apalancamiento usado en dimensionamiento", minval=1.0, step=0.5)
+allow_long = input.bool(true, "Permitir largos")
+allow_short = input.bool(true, "Permitir cortos")
+stop_after_first_win = input.bool(true, "Detener tras primer trade ganador")
+first_trade_loss_stop = input.float(-60.0, "Pérdida máxima permitida en primer trade", step=1.0)
+max_trades_per_day = input.int(2, "Máx. trades por día", minval=1, maxval=10)
+
+// Ventana de trading y cierre forzado (equivalente a TRADING_WINDOW y FORCE_CLOSE)
+trade_start_hour = input.int(9, "Hora inicio ventana trading", minval=0, maxval=23)
+trade_start_minute = input.int(30, "Minuto inicio ventana trading", minval=0, maxval=59)
+trade_end_hour = input.int(11, "Hora fin ventana trading", minval=0, maxval=23)
+trade_end_minute = input.int(30, "Minuto fin ventana trading", minval=0, maxval=59)
+force_close_hour = input.int(13, "Hora de cierre forzado", minval=0, maxval=23)
+force_close_minute = input.int(0, "Minuto de cierre forzado", minval=0, maxval=59)
+
+// Parámetros auxiliares
+show_state_bg = input.bool(false, "Colorear fondo según estado activo")
+
+// ---------------------------------------------------------------------------
+//  Utilidades de tiempo (equivalente a shared.time_windows)
+// ---------------------------------------------------------------------------
+get_timestamp(hour, minute) => timestamp(market_tz, year(time), month(time), dayofmonth(time), hour, minute)
+
+or_guard_ready_ts(day_ts) =>
+    base_year = year(day_ts)
+    base_month = month(day_ts)
+    base_day = dayofmonth(day_ts)
+    timestamp(market_tz, base_year, base_month, base_day, or_start_hour, or_start_minute) + or_guard_minutes * 60000
+
+// ---------------------------------------------------------------------------
+//  Identificadores de estados (equivalentes a strategies.level_fsm.State)
+// ---------------------------------------------------------------------------
+enum FsmState
+    IDLE
+    BROKEN
+    IN_RETEST_WINDOW
+    SIGNAL_EMITTED
+    INVALIDATED
+
+// ---------------------------------------------------------------------------
+//  Variables persistentes por día
+// ---------------------------------------------------------------------------
+var int current_day = na
+var float or_high = na
+var float or_low = na
+var bool or_ready = false
+var int or_start_ts = na
+var int or_end_ts = na
+var int trading_start_ts = na
+var int trading_end_ts = na
+var int force_close_ts = na
+var int guard_ready_ts = na
+
+var int daily_index = 0
+
+// FSM para ORH (nivel superior, dirección alcista)
+var FsmState orh_state = FsmState.IDLE
+var int orh_break_index = na
+var int orh_break_time = na
+var float orh_break_price = na
+var float orh_break_low = na
+var float orh_break_high = na
+var float orh_sl_default = na
+var float orh_sl_reduced = na
+var float orh_retest_price = na
+var int orh_retest_index = na
+
+// FSM para ORL (nivel inferior, dirección bajista)
+var FsmState orl_state = FsmState.IDLE
+var int orl_break_index = na
+var int orl_break_time = na
+var float orl_break_price = na
+var float orl_break_low = na
+var float orl_break_high = na
+var float orl_sl_default = na
+var float orl_sl_reduced = na
+var float orl_retest_price = na
+var int orl_retest_index = na
+
+// Gestión de trades diarios
+var int trades_today = 0
+var bool stop_trading_for_day = false
+var int prev_closed_trades = 0
+var float last_trade_pnl = na
+
+// Variables activas de posición
+var int active_direction = 0  // 1 = long, -1 = short, 0 = flat
+var float active_sl = na
+var float active_tp = na
+var string active_level = ""
+var bool force_close_triggered = false
+
+// SL/TP pendientes al momento de emitir señal (antes de ejecutar orden)
+var float pending_long_sl = na
+var float pending_long_tp = na
+var float pending_short_sl = na
+var float pending_short_tp = na
+
+// Objetos de dibujo para líneas OR
+var line line_orh = na
+var line line_orl = na
+
+// Flags por barra para debug y alerts
+var bool break_long_event = false
+var bool break_short_event = false
+var bool retest_long_event = false
+var bool retest_short_event = false
+var bool signal_long_event = false
+var bool signal_short_event = false
+var bool entry_long_event = false
+var bool entry_short_event = false
+var bool exit_long_event = false
+var bool exit_short_event = false
+var bool force_close_event = false
+
+// ---------------------------------------------------------------------------
+//  Reset diario: equivalente a OpeningBreakRetestStrategy.reset_for_new_day()
+// ---------------------------------------------------------------------------
+new_day = ta.change(time("D"))
+if new_day
+    current_day := dayofyear(time)
+    or_high := na
+    or_low := na
+    or_ready := false
+    or_start_ts := get_timestamp(or_start_hour, or_start_minute)
+    or_end_ts := or_start_ts + or_window_minutes * 60000
+    guard_ready_ts := or_guard_ready_ts(time)
+    trading_start_ts := get_timestamp(trade_start_hour, trade_start_minute)
+    trading_end_ts := get_timestamp(trade_end_hour, trade_end_minute)
+    force_close_ts := get_timestamp(force_close_hour, force_close_minute)
+    daily_index := 0
+    trades_today := 0
+    stop_trading_for_day := false
+    force_close_triggered := false
+    orh_state := FsmState.IDLE
+    orl_state := FsmState.IDLE
+    orh_break_index := na
+    orl_break_index := na
+    prev_closed_trades := strategy.closedtrades
+    last_trade_pnl := na
+    active_direction := 0
+    active_sl := na
+    active_tp := na
+    active_level := ""
+    pending_long_sl := na
+    pending_long_tp := na
+    pending_short_sl := na
+    pending_short_tp := na
+    if not na(line_orh)
+        line.delete(line_orh)
+        line_orh := na
+    if not na(line_orl)
+        line.delete(line_orl)
+        line_orl := na
+else
+    daily_index += 1
+
+// ---------------------------------------------------------------------------
+//  Cálculo de OR (idéntico a herramientas que usan high/low en ventana)
+// ---------------------------------------------------------------------------
+if time >= or_start_ts and time < or_end_ts
+    or_high := na(or_high) ? high : math.max(or_high, high)
+    or_low := na(or_low) ? low : math.min(or_low, low)
+if not or_ready and not na(or_high) and not na(or_low) and time >= or_end_ts
+    or_ready := true
+
+// Actualizar líneas OR (se extienden en el día actual)
+if or_ready
+    if na(line_orh)
+        line_orh := line.new(bar_index, or_high, bar_index + 1, or_high, extend=extend.right, color=color.new(color.yellow, 0))
+    else
+        x1_orh = bar_index > 0 ? bar_index - 1 : bar_index
+        line.set_xy1(line_orh, x1_orh, or_high)
+        line.set_xy2(line_orh, bar_index, or_high)
+    if na(line_orl)
+        line_orl := line.new(bar_index, or_low, bar_index + 1, or_low, extend=extend.right, color=color.new(color.orange, 0))
+    else
+        x1_orl = bar_index > 0 ? bar_index - 1 : bar_index
+        line.set_xy1(line_orl, x1_orl, or_low)
+        line.set_xy2(line_orl, bar_index, or_low)
+
+// ---------------------------------------------------------------------------
+//  Ventana de trading y guardias (equivalentes a shared.time_windows)
+// ---------------------------------------------------------------------------
+can_trade_time = time >= trading_start_ts and time <= trading_end_ts
+force_close_now = time >= force_close_ts
+
+// Guardia OR opcional (equivalente a _should_guard_or_level)
+function is_or_guard_active(level_price) => use_or_guard and time < guard_ready_ts
+
+// Reset de flags por barra
+break_long_event := false
+break_short_event := false
+retest_long_event := false
+retest_short_event := false
+signal_long_event := false
+signal_short_event := false
+entry_long_event := false
+entry_short_event := false
+exit_long_event := false
+exit_short_event := false
+force_close_event := false
+
+// ---------------------------------------------------------------------------
+//  Helpers de rango/tolerancia y SL idénticos al motor
+// ---------------------------------------------------------------------------
+get_level_tolerance(level) =>
+    level == "ORH" or level == "ORL" ? or_tolerance :
+        level == "PDH" or level == "PDL" ? pdh_tolerance :
+            level == "PMH" or level == "PML" ? pmh_tolerance : 0.0
+
+sl_default_len = math.max(1, sl_lookback + 1)
+sl_reduced_len = 2
+
+// ---------------------------------------------------------------------------
+//  Procesamiento de FSM para ORH (dirección alcista)
+// ---------------------------------------------------------------------------
+if or_ready and allow_long and not stop_trading_for_day and can_trade_time and not is_or_guard_active(or_high)
+    if orh_state == FsmState.IDLE and not na(close[1])
+        prev_body_mid = (open[1] + close[1]) / 2.0
+        curr_body_mid = (open + close) / 2.0
+        if prev_body_mid < or_high and curr_body_mid > or_high
+            orh_state := FsmState.BROKEN
+            orh_break_index := daily_index
+            orh_break_time := time
+            orh_break_price := close
+            orh_break_low := low
+            orh_break_high := high
+            len_default = math.min(bar_index + 1, sl_default_len)
+            len_reduced = math.min(bar_index + 1, sl_reduced_len)
+            orh_sl_default := ta.lowest(low, len_default)
+            orh_sl_reduced := ta.lowest(low, len_reduced)
+            break_long_event := true
+    if orh_state == FsmState.BROKEN and not na(orh_break_index) and daily_index > orh_break_index
+        candles_since_break = daily_index - orh_break_index
+        if candles_since_break > max_retest_candles
+            orh_state := FsmState.INVALIDATED
+        else if close < or_high
+            orh_state := FsmState.INVALIDATED
+        else
+            tol = get_level_tolerance("ORH")
+            retest_zone_high = or_high + tol
+            if low <= retest_zone_high and close > or_high
+                orh_state := FsmState.IN_RETEST_WINDOW
+                orh_retest_index := daily_index
+                orh_retest_price := close
+                retest_long_event := true
+    if orh_state == FsmState.IN_RETEST_WINDOW
+        orh_state := FsmState.SIGNAL_EMITTED
+        // Cálculo del SL idéntico a _calculate_sl
+        sl_price = na
+        method_to_use = sl_method
+        if method_to_use == "LOOKBACK_MIN_MAX"
+            if not na(orh_sl_default)
+                sl_price := orh_sl_default
+            else
+                method_to_use := "BREAK_LOW_HIGH"
+            if method_to_use == "LOOKBACK_MIN_MAX" and not na(sl_price)
+                or_midpoint = na(or_high) or na(or_low) ? na : (or_high + or_low) / 2.0
+                reduce = not na(or_midpoint) and sl_price < or_midpoint
+                if reduce and not na(orh_sl_reduced)
+                    sl_price := orh_sl_reduced
+        if method_to_use == "BREAK_LOW_HIGH" or na(sl_price)
+            sl_price := orh_break_low
+        if na(sl_price) or math.abs(orh_retest_price - sl_price) < 1e-9
+            orh_state := FsmState.INVALIDATED
+        else
+            risk_distance = math.abs(orh_retest_price - sl_price)
+            tp_price = orh_retest_price + risk_distance * risk_reward_ratio
+            signal_long_event := true
+            pending_long_sl := sl_price
+            pending_long_tp := tp_price
+
+// ---------------------------------------------------------------------------
+//  Procesamiento de FSM para ORL (dirección bajista)
+// ---------------------------------------------------------------------------
+if or_ready and allow_short and not stop_trading_for_day and can_trade_time and not is_or_guard_active(or_low)
+    if orl_state == FsmState.IDLE and not na(close[1])
+        prev_body_mid = (open[1] + close[1]) / 2.0
+        curr_body_mid = (open + close) / 2.0
+        if prev_body_mid > or_low and curr_body_mid < or_low
+            orl_state := FsmState.BROKEN
+            orl_break_index := daily_index
+            orl_break_time := time
+            orl_break_price := close
+            orl_break_low := low
+            orl_break_high := high
+            len_default = math.min(bar_index + 1, sl_default_len)
+            len_reduced = math.min(bar_index + 1, sl_reduced_len)
+            orl_sl_default := ta.highest(high, len_default)
+            orl_sl_reduced := ta.highest(high, len_reduced)
+            break_short_event := true
+    if orl_state == FsmState.BROKEN and not na(orl_break_index) and daily_index > orl_break_index
+        candles_since_break = daily_index - orl_break_index
+        if candles_since_break > max_retest_candles
+            orl_state := FsmState.INVALIDATED
+        else if close > or_low
+            orl_state := FsmState.INVALIDATED
+        else
+            tol = get_level_tolerance("ORL")
+            retest_zone_low = or_low - tol
+            if high >= retest_zone_low and close < or_low
+                orl_state := FsmState.IN_RETEST_WINDOW
+                orl_retest_index := daily_index
+                orl_retest_price := close
+                retest_short_event := true
+    if orl_state == FsmState.IN_RETEST_WINDOW
+        orl_state := FsmState.SIGNAL_EMITTED
+        sl_price = na
+        method_to_use = sl_method
+        if method_to_use == "LOOKBACK_MIN_MAX"
+            if not na(orl_sl_default)
+                sl_price := orl_sl_default
+            else
+                method_to_use := "BREAK_LOW_HIGH"
+            if method_to_use == "LOOKBACK_MIN_MAX" and not na(sl_price)
+                or_midpoint = na(or_high) or na(or_low) ? na : (or_high + or_low) / 2.0
+                reduce = not na(or_midpoint) and sl_price > or_midpoint
+                if reduce and not na(orl_sl_reduced)
+                    sl_price := orl_sl_reduced
+        if method_to_use == "BREAK_LOW_HIGH" or na(sl_price)
+            sl_price := orl_break_high
+        if na(sl_price) or math.abs(orl_retest_price - sl_price) < 1e-9
+            orl_state := FsmState.INVALIDATED
+        else
+            risk_distance = math.abs(orl_retest_price - sl_price)
+            tp_price = orl_retest_price - risk_distance * risk_reward_ratio
+            signal_short_event := true
+            pending_short_sl := sl_price
+            pending_short_tp := tp_price
+
+// ---------------------------------------------------------------------------
+//  Emisión de señales y colocación de órdenes (equivalente a strategy.entry)
+// ---------------------------------------------------------------------------
+position_flat = strategy.position_size == 0 and active_direction == 0
+
+if signal_long_event and position_flat
+    sl = pending_long_sl
+    tp = pending_long_tp
+    base_capital = math.max(strategy.initial_capital, strategy.equity)
+    qty_cash = base_capital * leverage_input
+    qty = qty_cash / close
+    strategy.entry("BR_LONG", strategy.long, qty=qty)
+    strategy.exit("BR_LONG_EXIT", "BR_LONG", stop=sl, limit=tp)
+    active_direction := 1
+    active_sl := sl
+    active_tp := tp
+    active_level := "ORH"
+    entry_long_event := true
+    orh_state := FsmState.SIGNAL_EMITTED
+    orl_state := FsmState.SIGNAL_EMITTED
+    pending_long_sl := na
+    pending_long_tp := na
+    position_flat := false
+
+if signal_short_event and position_flat
+    sl = pending_short_sl
+    tp = pending_short_tp
+    base_capital = math.max(strategy.initial_capital, strategy.equity)
+    qty_cash = base_capital * leverage_input
+    qty = qty_cash / close
+    strategy.entry("BR_SHORT", strategy.short, qty=qty)
+    strategy.exit("BR_SHORT_EXIT", "BR_SHORT", stop=sl, limit=tp)
+    active_direction := -1
+    active_sl := sl
+    active_tp := tp
+    active_level := "ORL"
+    entry_short_event := true
+    orh_state := FsmState.SIGNAL_EMITTED
+    orl_state := FsmState.SIGNAL_EMITTED
+    pending_short_sl := na
+    pending_short_tp := na
+    position_flat := false
+
+// ---------------------------------------------------------------------------
+//  Gestión de cierres forzados (equivalente a is_force_close)
+// ---------------------------------------------------------------------------
+if strategy.position_size != 0 and force_close_now and not force_close_triggered
+    if active_direction == 1
+        strategy.close("BR_LONG")
+        force_close_event := true
+    else if active_direction == -1
+        strategy.close("BR_SHORT")
+        force_close_event := true
+    force_close_triggered := true
+
+// ---------------------------------------------------------------------------
+//  Detección de cierres y reglas de stop diario (equivalente al motor)
+// ---------------------------------------------------------------------------
+closed_trades = strategy.closedtrades
+if closed_trades > prev_closed_trades
+    for idx = prev_closed_trades to closed_trades - 1
+        pnl = strategy.closedtrades.profit(idx)
+        last_trade_pnl := pnl
+        trades_today += 1
+        if stop_after_first_win and pnl > 0
+            stop_trading_for_day := true
+        else if trades_today == 1 and pnl <= first_trade_loss_stop
+            stop_trading_for_day := true
+        else if trades_today >= max_trades_per_day
+            stop_trading_for_day := true
+    prev_closed_trades := closed_trades
+    exit_long_event := active_direction == 1
+    exit_short_event := active_direction == -1
+    active_direction := 0
+    active_sl := na
+    active_tp := na
+    active_level := ""
+    force_close_triggered := false
+    // Equivalente a OpeningBreakRetestStrategy.reset()
+    orh_state := FsmState.IDLE
+    orl_state := FsmState.IDLE
+    orh_break_index := na
+    orl_break_index := na
+
+// ---------------------------------------------------------------------------
+//  Visualización y depuración
+// ---------------------------------------------------------------------------
+plotshape(break_long_event, title="ORH Break", color=color.new(color.green, 0), style=shape.triangleup, location=location.abovebar, size=size.tiny, text="BREAK")
+plotshape(retest_long_event, title="ORH Retest", color=color.new(color.green, 20), style=shape.circle, location=location.belowbar, size=size.tiny, text="RETEST")
+plotshape(entry_long_event, title="Señal Long", color=color.new(color.green, 0), style=shape.labelup, location=location.belowbar, text="LONG")
+
+plotshape(break_short_event, title="ORL Break", color=color.new(color.red, 0), style=shape.triangledown, location=location.belowbar, size=size.tiny, text="BREAK")
+plotshape(retest_short_event, title="ORL Retest", color=color.new(color.red, 20), style=shape.circle, location=location.abovebar, size=size.tiny, text="RETEST")
+plotshape(entry_short_event, title="Señal Short", color=color.new(color.red, 0), style=shape.labeldown, location=location.abovebar, text="SHORT")
+
+plotshape(exit_long_event, title="Salida Long", color=color.new(color.blue, 0), style=shape.cross, location=location.abovebar, size=size.tiny, text="EXIT")
+plotshape(exit_short_event, title="Salida Short", color=color.new(color.blue, 0), style=shape.cross, location=location.belowbar, size=size.tiny, text="EXIT")
+plotshape(force_close_event, title="Force Close", color=color.new(color.yellow, 0), style=shape.xcross, location=location.top, text="FC")
+
+bgcolor(show_state_bg ? (orh_state == FsmState.BROKEN or orl_state == FsmState.BROKEN ? color.new(color.orange, 85) : orh_state == FsmState.SIGNAL_EMITTED or orl_state == FsmState.SIGNAL_EMITTED ? color.new(color.green, 90) : na) : na)
+
+plot(or_ready ? or_high : na, title="ORH", color=color.new(color.yellow, 0), linewidth=2)
+plot(or_ready ? or_low : na, title="ORL", color=color.new(color.orange, 0), linewidth=2)
+
+// ---------------------------------------------------------------------------
+//  Alertas (payload JSON estable para webhooks)
+// ---------------------------------------------------------------------------
+alertcondition(entry_long_event, title="ENTRY_LONG", message='{"symbol":"{{ticker}}","tf":"{{interval}}","signal":"ENTRY_LONG"}')
+alertcondition(entry_short_event, title="ENTRY_SHORT", message='{"symbol":"{{ticker}}","tf":"{{interval}}","signal":"ENTRY_SHORT"}')
+alertcondition(exit_long_event, title="EXIT_LONG", message='{"symbol":"{{ticker}}","tf":"{{interval}}","signal":"EXIT_LONG"}')
+alertcondition(exit_short_event, title="EXIT_SHORT", message='{"symbol":"{{ticker}}","tf":"{{interval}}","signal":"EXIT_SHORT"}')
+alertcondition(force_close_event, title="FORCE_CLOSE", message='{"symbol":"{{ticker}}","tf":"{{interval}}","signal":"FORCE_CLOSE"}')
+
+// Información diagnóstica opcional
+var label info_label = na
+if barstate.islastconfirmedhistory
+    label_text = "FSM ORH=" + str.tostring(orh_state) + " ORL=" + str.tostring(orl_state) + " TradesHoy=" + str.tostring(trades_today) + " StopDay=" + str.tostring(stop_trading_for_day)
+    if na(info_label)
+        info_label := label.new(bar_index, high, label_text, color=color.new(color.silver, 70), textcolor=color.black, style=label.style_label_left, size=size.tiny)
+    else
+        label.set_xy(info_label, bar_index, high)
+        label.set_text(info_label, label_text)
